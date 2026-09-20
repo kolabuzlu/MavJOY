@@ -266,6 +266,28 @@ again, often without you noticing; a `oneway` cannot be, and getting it back
 takes a deliberate move on a different control. It arms nothing on its own:
 only CH5 does that, whatever a channel is mapped to.
 
+### Remembering where you left them
+
+Close the app and the latching channels come back where they were: toggles,
+one-ways, cycles and switches, CH5–16. **CH1–4 are never remembered** — the
+same four as the resume hold, for the same reason. Sticks are whatever they
+are now.
+
+It is written when the window closes, not by **Save**, because it is a
+record of where the controls were rather than a setting you chose. Closing
+re-reads `config.json` first and writes only that one key, so shutting the
+window never commits edits you were still making in the tabs.
+
+State is stored **against the channel**, with the source it came from. Remap
+that channel to something else and the old state is dropped rather than
+applied to whatever took its place — it was never about that control.
+
+The Log names what was carried over, and names separately anything that came
+back **high**, because starting a link sends it straight out. Anything you
+moved on the gamepad while the app was shut is not in there: the app cannot
+know about it. The confirmation before the first frame lists it again, which
+is the gate that matters.
+
 ### Multi-position switches
 
 A three-way switch on a gamepad usually reports as three separate buttons

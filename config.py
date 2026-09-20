@@ -43,6 +43,10 @@ DEFAULT_CONFIG = {
     # One entry per device slot: slot 0 is the sticks, slot 1 can be a
     # separate USB throttle. null leaves a slot empty.
     "gamepads": [0, None],
+    # Latch positions carried over from the last run, keyed by channel
+    # number. Written when the app closes, not by Save, because it is a
+    # record of where the controls were rather than a setting.
+    "latches": {},
     "deadzone": 0.05,
     "axis_deadzone": {},  # per-axis overrides, keyed by axis number
     "throttle": {

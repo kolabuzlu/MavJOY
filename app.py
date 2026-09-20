@@ -66,6 +66,7 @@ class App(tk.Tk):
         self.gamepad.start()
         self.mixer = gp.Mixer(self.cfg)
         self.mixer.reset()
+        self._restored = self.mixer.restore_latches(self.cfg.get("latches"))
 
         self._build_menu()
         self._build_top()
@@ -84,6 +85,21 @@ class App(tk.Tk):
             self.log("warn", warning)
         if simulate:
             self.log("warn", "SIMULATION MODE - gamepad input is synthetic")
+        if self._restored:
+            names = ", ".join(f"CH{n}" for n in self._restored)
+            self.log("info", f"Carried over from last time: {names}. Anything "
+                             f"moved while the app was shut is not in there, "
+                             f"so check the Channels tab before starting a "
+                             f"link.")
+            vals = self.mixer.latched_values()
+            high = [n for n in self._restored
+                    if vals.get(n, crsf.CHANNEL_MIN) > crsf.CHANNEL_MID]
+            if high:
+                self.log("warn", "Restored HIGH: "
+                                 + ", ".join(f"CH{n}" for n in high)
+                                 + ". Starting a link sends that straight out; "
+                                   "the confirmation before the first frame "
+                                   "lists it again.")
         self.log("info", "Ready. Fit the antenna and power the module before starting a link.")
 
     # =================================================================== UI
@@ -1935,8 +1951,24 @@ class App(tk.Tk):
 
     def on_close(self):
         self.stop_link(reason="application closing")
+        self._remember_latches()
         self.gamepad.stop()
         self.destroy()
+
+    def _remember_latches(self):
+        """Write where the latching channels were left, and nothing else.
+
+        The config on disk is re-read first so that only this is written:
+        closing the window is not a Save, and unsaved edits in the tabs
+        should not be committed by one.
+        """
+        try:
+            saved, _warning = configmod.load()
+            saved["latches"] = self.mixer.latch_state()
+            configmod.save(saved)
+        except Exception as exc:
+            # Closing must not fail over a file that will not be written.
+            self.log("warn", f"Could not remember channel positions: {exc}")
 
 
 def main():

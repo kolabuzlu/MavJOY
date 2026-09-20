@@ -8,6 +8,7 @@ URL handler, which exercises the same pyserial read/write paths."""
 
 import os
 import socket
+import tempfile
 import sys
 import threading
 import time
@@ -330,6 +331,57 @@ def _check_arm_from_model():
     assert w.feed(None) is None, "losing telemetry must not read as armed"
 
 
+def _check_latch_memory():
+    """Latching channels come back where they were left, CH1-4 excepted.
+
+    The round trip goes through the config file itself, because "remembered
+    across a restart" is a claim about what survives being written to disk
+    and read back, not about two objects in one process.
+    """
+    print("")
+    print("-- remembering latches --")
+    cfg = configmod.default_config()
+    cfg["channels"][0] = {"src": "toggle", "idx": 1}            # CH1, exempt
+    cfg["channels"][4] = {"src": "toggle", "idx": 2}            # CH5
+    cfg["channels"][5] = {"src": "oneway", "idx": 3}            # CH6
+    cfg["channels"][6] = {"src": "cycle", "idx": 4, "steps": 3}  # CH7
+
+    m = gp.Mixer(cfg)
+    m.reset()
+    m._toggles[(0, 1)] = True          # CH1: must NOT be remembered
+    m._toggles[(0, 2)] = True
+    m._oneway[(0, 3)] = True
+    m._cycles[(0, 4)] = 2
+
+    path = os.path.join(tempfile.gettempdir(), "mavjoy_latch_test.json")
+    cfg["latches"] = m.latch_state()
+    configmod.save(cfg, path)
+    reloaded, _warn = configmod.load(path)
+    os.unlink(path)
+    print(f"   written and read back: {reloaded['latches']}")
+    assert "1" not in reloaded["latches"], "CH1 must never be remembered"
+
+    back = gp.Mixer(cfg)
+    back.reset()
+    restored = back.restore_latches(reloaded["latches"])
+    print(f"   restored:              {restored}")
+    print(f"   values:                {back.latched_values()}")
+    assert restored == [5, 6, 7], f"expected CH5-7, got {restored}"
+    assert back.latched_values()[5] == crsf.CHANNEL_MAX
+    assert back.latched_values()[6] == crsf.CHANNEL_MAX
+    assert back._cycles[(0, 4)] == 2, "a cycle must come back on its position"
+
+    # Remap CH5 to something else: its old state is not about that control
+    # any more, so it must be dropped rather than applied to what took over.
+    moved = configmod.default_config()
+    moved["channels"][4] = {"src": "axis", "idx": 2}
+    other = gp.Mixer(moved)
+    other.reset()
+    kept = other.restore_latches(reloaded["latches"])
+    print(f"   after remapping CH5:   {kept}")
+    assert 5 not in kept, "a remapped channel must not take the old latch"
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -497,6 +549,7 @@ def _run(wire):
     _check_oneway()
     _check_arm_is_ch5()
     _check_arm_from_model()
+    _check_latch_memory()
 
     lk.stop()
     lk.join(timeout=2)

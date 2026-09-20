@@ -898,6 +898,96 @@ class Mixer:
                 self._cycles[key] = 0
             vals[i] = self._channel_value(ch, _BLANK_STATE, 0.0, _NO_EDGES)
 
+    # ------------------------------------------------- remembering latches
+    def latch_state(self):
+        """What every latching channel is holding, keyed by channel number.
+
+        Keyed by the channel rather than by the latch's own key, because
+        those keys are made of device and button numbers: saving them and
+        putting them back blind would drop an old state onto whatever
+        happens to be mapped there next. Channel plus source is enough to
+        say "this is the same control", and to notice when it is not.
+
+        CH1-4 are left out, the same four as HOLD_EXEMPT and for the same
+        reason: the sticks are never anything but where they are now.
+        """
+        exempt = set(self.HOLD_EXEMPT)
+        out = {}
+        for i, ch in enumerate(self.channels):
+            n = i + 1
+            if n in exempt:
+                continue
+            state = self._latch_for(ch)
+            if state is None:
+                continue
+            out[str(n)] = {"src": ch.src, "state": state}
+        return out
+
+    def _latch_for(self, ch):
+        if ch.src == "toggle":
+            return self._toggles.get((ch.dev, ch.idx))
+        if ch.src == "oneway":
+            return self._oneway.get((ch.dev, ch.idx))
+        if ch.src == "cycle":
+            return self._cycles.get((ch.dev, ch.idx))
+        if ch.src == "switch":
+            return self._switches.get((ch.dev, tuple(ch.switch_buttons())))
+        return None
+
+    def latched_values(self):
+        """What each latching channel would send from its stored state alone.
+
+        Read from the latch rather than from last_values, which at startup
+        is still the failsafe set: nothing has been computed yet, and the
+        whole question here is what the stored state will put on the wire
+        the moment something is.
+        """
+        out = {}
+        for i, ch in enumerate(self.channels):
+            if self._latch_for(ch) is None:
+                continue
+            out[i + 1] = self._channel_value(ch, _BLANK_STATE, 0.0, _NO_EDGES)
+        return out
+
+    def restore_latches(self, saved):
+        """Put back what latch_state saved; returns the channels restored.
+
+        An entry is ignored unless the channel still reads the same kind of
+        source. Remap a channel and its old state is not about the same
+        control any more, so it is dropped rather than applied to whatever
+        took its place.
+        """
+        exempt = set(self.HOLD_EXEMPT)
+        restored = []
+        for key, entry in (saved or {}).items():
+            try:
+                n = int(key)
+            except (TypeError, ValueError):
+                continue
+            if n in exempt or not 1 <= n <= len(self.channels):
+                continue
+            if not isinstance(entry, dict):
+                continue
+            ch = self.channels[n - 1]
+            if entry.get("src") != ch.src:
+                continue
+            state = entry.get("state")
+            try:
+                if ch.src == "toggle":
+                    self._toggles[(ch.dev, ch.idx)] = bool(state)
+                elif ch.src == "oneway":
+                    self._oneway[(ch.dev, ch.idx)] = bool(state)
+                elif ch.src == "cycle":
+                    self._cycles[(ch.dev, ch.idx)] = max(0, int(state))
+                elif ch.src == "switch":
+                    self._switches[(ch.dev, tuple(ch.switch_buttons()))] =                         max(0, int(state))
+                else:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            restored.append(n)
+        return sorted(restored)
+
     def required_devices(self):
         """Slots the map actually reads.
 
