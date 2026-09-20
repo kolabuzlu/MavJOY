@@ -257,11 +257,12 @@ class SimGamepadThread(threading.Thread):
 #  Channel mapping
 # ===========================================================================
 
-SOURCES = ("none", "axis", "throttle", "button", "toggle", "cycle", "hat_x", "hat_y", "fixed")
+SOURCES = ("none", "axis", "throttle", "button", "toggle", "cycle", "switch",
+           "hat_x", "hat_y", "fixed")
 
 # Sources that read a numbered input. The rest ignore the index: none
 # sends centre, throttle comes from its own engine, fixed uses value.
-INDEXED_SOURCES = ("axis", "button", "toggle", "cycle", "hat_x", "hat_y")
+INDEXED_SOURCES = ("axis", "button", "toggle", "cycle", "switch", "hat_x", "hat_y")
 
 SOURCE_HELP = {
     "none": "sends centre (992)",
@@ -270,6 +271,8 @@ SOURCE_HELP = {
     "button": "momentary: low when released, high while held",
     "toggle": "latching: each press flips low/high (use for ARM)",
     "cycle": "each press steps to the next position, then wraps",
+    "switch": "multi-position switch wired as one button per position: index "
+              "is the first button, steps is how many",
     "hat_x": "d-pad left/right",
     "hat_y": "d-pad up/down",
     "fixed": "constant value",
@@ -361,18 +364,34 @@ class ChannelMap:
     idx: int = 0
     inv: bool = False
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
-    steps: int = 3                 # for src == "cycle"
+    steps: int = 3                 # positions, for "cycle" and "switch"
+    buttons: tuple = ()            # for "switch": explicit, non-consecutive
+
+    def switch_buttons(self):
+        """The buttons a switch watches, one per position.
+
+        Most multi-position switches report as a consecutive block, so the
+        map only needs the first button and a count. An explicit list in
+        config.json covers the ones that do not."""
+        if self.buttons:
+            return list(self.buttons)
+        count = max(2, min(6, int(self.steps)))
+        return [self.idx + i for i in range(count)]
 
     @classmethod
     def from_dict(cls, d):
         return cls(src=d.get("src", "none"), idx=int(d.get("idx", 0)),
                    inv=bool(d.get("inv", False)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
-                   steps=int(d.get("steps", 3)))
+                   steps=int(d.get("steps", 3)),
+                   buttons=tuple(d.get("buttons") or ()))
 
     def to_dict(self):
-        return {"src": self.src, "idx": self.idx, "inv": self.inv,
-                "value": self.value, "steps": self.steps}
+        out = {"src": self.src, "idx": self.idx, "inv": self.inv,
+               "value": self.value, "steps": self.steps}
+        if self.buttons:
+            out["buttons"] = list(self.buttons)
+        return out
 
 
 class Mixer:
@@ -392,6 +411,7 @@ class Mixer:
                               for k, v in (config.get("axis_deadzone") or {}).items()}
         self._toggles = {}
         self._cycles = {}
+        self._switches = {}
         self._prev_buttons = ()
         self._last_t = None
         self.last_values = [crsf.CHANNEL_MID] * crsf.NUM_CHANNELS
@@ -404,6 +424,7 @@ class Mixer:
         """Called before a link is started: everything back to a safe state."""
         self._toggles.clear()
         self._cycles.clear()
+        self._switches.clear()
         self._prev_buttons = ()
         self._last_t = None
         self.throttle.reset()
@@ -414,7 +435,7 @@ class Mixer:
         for i, ch in enumerate(self.channels):
             if ch.src == "throttle":
                 vals[i] = crsf.CHANNEL_MIN
-            elif ch.src in ("button", "toggle", "cycle"):
+            elif ch.src in ("button", "toggle", "cycle", "switch"):
                 vals[i] = crsf.CHANNEL_MIN
             elif ch.src == "fixed":
                 vals[i] = ch.value
@@ -481,6 +502,26 @@ class Mixer:
             if ch.idx in pressed:
                 self._cycles[ch.idx] = (self._cycles.get(ch.idx, 0) + 1) % steps
             pos = self._cycles.get(ch.idx, 0)
+            if ch.inv:
+                pos = steps - 1 - pos
+            return crsf.CHANNEL_MIN + round(pos * (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)
+                                            / (steps - 1))
+
+        if src == "switch":
+            buttons = ch.switch_buttons()
+            steps = max(2, len(buttons))
+            pos = None
+            for i, btn in enumerate(buttons):
+                if 0 <= btn < len(st.buttons) and st.buttons[btn]:
+                    pos = i
+                    break
+            if pos is None:
+                # Nothing lit. Real switches pass through a gap between
+                # detents, so hold the last position rather than snapping the
+                # channel to an end stop mid-move.
+                pos = self._switches.get(ch.idx, 0)
+            else:
+                self._switches[ch.idx] = pos
             if ch.inv:
                 pos = steps - 1 - pos
             return crsf.CHANNEL_MIN + round(pos * (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)

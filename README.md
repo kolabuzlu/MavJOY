@@ -124,8 +124,33 @@ numbers, so you can confirm what your pad actually reports and build the
 mapping to match.
 
 Channel sources: `axis`, `button` (momentary), `toggle` (latching — use for
-arm), `cycle` (steps through 2–6 positions, for flight modes), `hat_x`/`hat_y`
-(d-pad), `fixed`, `throttle`, `none`.
+arm), `cycle` (steps through 2–6 positions on each press), `switch` (a real
+multi-position switch — see below), `hat_x`/`hat_y` (d-pad), `fixed`,
+`throttle`, `none`.
+
+### Multi-position switches
+
+A three-way switch on a gamepad usually reports as three separate buttons
+with exactly one lit at a time — position 1 lights button 8, position 2
+lights 9, position 3 lights 10. That is not a `cycle`, which advances on
+each press, and not a `button`, which only knows on and off.
+
+Use `switch`: **index** is the first button and **steps** is how many
+positions. For the example above, `switch`, index 8, steps 3 gives
+988 / 1500 / 2012 µs — exactly the three values a flight controller expects
+from a 3-position mode switch. `inv` reverses the order.
+
+Unlike `cycle` this reads the button state rather than counting presses, so
+it cannot drift out of step and picks up the switch's real position as soon
+as the link starts. While a switch is between detents no button is lit, so
+the channel holds its last position instead of snapping to an end stop.
+
+If your switch's buttons are not consecutive, put the list in
+`config.json` directly:
+
+```json
+{ "src": "switch", "idx": 0, "steps": 3, "buttons": [4, 7, 11] }
+```
 
 ### Deadzone
 

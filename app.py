@@ -622,8 +622,9 @@ class App(tk.Tk):
         """Show none and lock the boxes a source does not use, rather than
         leaving a number sitting there implying it does something.
 
-        Index applies to sources that read a numbered input; steps only to
-        cycle, which is the one that walks through several positions."""
+        Index applies to sources that read a numbered input; steps to the
+        two that have several positions - cycle, which advances on each
+        press, and switch, which reads one button per position."""
         w = self.ch_widgets[n]
         ch = self.mixer.channels[n]
 
@@ -634,7 +635,7 @@ class App(tk.Tk):
             w["idx"].set(self.NO_INDEX)
             w["spin"].config(state="disabled")
 
-        if ch.src == "cycle":
+        if ch.src in ("cycle", "switch"):
             w["steps_spin"].config(state="normal")
             w["steps"].set(str(ch.steps))
         else:
