@@ -94,17 +94,24 @@ class LinkStats:
 class _ParamJob:
     """One settings operation, driven a step at a time by the link thread."""
 
-    # ExpressLRS applies and saves a parameter write asynchronously. Reading
-    # the field back too soon returns the OLD value, which looks exactly like
-    # a write that was rejected. Measured on ELRS 4.1: a re-read 150 ms after
-    # the write still reported the previous rate; 2.5 s reported the new one.
-    WRITE_SETTLE = 1.2
+    # ExpressLRS applies a write asynchronously, and how long that takes
+    # depends on the field: measured on ELRS 4.1, Fan Thresh is already in
+    # effect by the first read ~150 ms later, while Packet Rate - which
+    # re-keys the RF link - still reports the old value at that point. It
+    # sends nothing to announce it either: writing a field and then listening
+    # for 3 s produced no unsolicited entry at all.
+    #
+    # So there is no signal to wait for and no single delay that is right.
+    # Read the field back instead, and keep reading until it reports the
+    # value we asked for or the deadline passes. A quick field finishes in
+    # one round trip; a slow one gets as long as it needs; and a genuine
+    # refusal is still a refusal once the deadline expires.
+    VERIFY_POLL = 0.12        # gap between read-backs while waiting
+    VERIFY_DEADLINE = 3.0     # stop waiting for the value to change
 
-    def __init__(self, kind, index=None, value=None, on_done=None, settle=None,
-                 width=1):
+    def __init__(self, kind, index=None, value=None, on_done=None, width=1):
         self.kind = kind
         self.width = width
-        self.settle = self.WRITE_SETTLE if settle is None else settle
         self.stage = kind
         self.index = index
         self.value = value
@@ -112,25 +119,29 @@ class _ParamJob:
         self.reader = crsf.ParamReader(index) if index is not None else None
         self.result = None
         self.complete = False
-        self._wrote = False
-        self._settle_until = 0.0
+        self._verify_until = 0.0
+        self._next_verify = 0.0
 
     def request(self):
+        now = time.monotonic()
+
         if self.stage == "ping":
             return crsf.device_ping_frame()
+
         if self.stage == "write":
-            if not self._wrote:
-                self._wrote = True
-                self._settle_until = time.monotonic() + self.settle
-                return crsf.param_write_frame(self.index, self.value, self.width)
-            if time.monotonic() < self._settle_until:
-                return None     # let the module apply and save first
-            # The write is sent once; read the field back to confirm what
-            # actually took effect rather than trusting the value we sent.
-            self.stage = "read"
+            # Sent once, then we watch the field rather than guessing a delay.
+            self.stage = "verify"
             self.reader = crsf.ParamReader(self.index)
-        if self.stage == "read":
+            self._verify_until = now + self.VERIFY_DEADLINE
+            self._next_verify = 0.0
+            return crsf.param_write_frame(self.index, self.value, self.width)
+
+        if self.stage == "verify" and now < self._next_verify:
+            return None
+
+        if self.stage in ("read", "verify"):
             return self.reader.next_request()
+
         return None
 
     def feed(self, ftype, payload):
@@ -143,16 +154,34 @@ class _ParamJob:
             self.result = info
             self.complete = True
             return True
+
+        if self.stage not in ("read", "verify"):
+            return False
+        if ftype != crsf.FRAMETYPE_PARAMETER_SETTINGS_ENTRY:
+            return False
+        if not self.reader.feed(payload):
+            return False
+        if not self.reader.done:
+            return True                     # more chunks to come
+
+        field = self.reader.field()
+        self.result = field
+
         if self.stage == "read":
-            if ftype != crsf.FRAMETYPE_PARAMETER_SETTINGS_ENTRY:
-                return False
-            if not self.reader.feed(payload):
-                return False
-            if self.reader.done:
-                self.result = self.reader.field()
-                self.complete = True
+            self.complete = True
             return True
-        return False
+
+        # Command fields carry a status rather than a value, so there is
+        # nothing to match against: one read-back is the answer.
+        if (field is None
+                or field.type == crsf.PARAM_COMMAND
+                or field.value == self.value
+                or time.monotonic() >= self._verify_until):
+            self.complete = True
+        else:
+            self.reader = crsf.ParamReader(self.index)
+            self._next_verify = time.monotonic() + self.VERIFY_POLL
+        return True
 
 
 class CrsfLink(threading.Thread):
@@ -210,19 +239,19 @@ class CrsfLink(threading.Thread):
         with self._lock:
             return dict(self.telemetry), self.stats
 
-    def submit(self, kind, index=None, value=None, on_done=None, settle=None,
-               width=1):
+    def submit(self, kind, index=None, value=None, on_done=None, width=1):
         """Queue a settings operation. `on_done(result, error)` is called on
         the link thread, so a GUI must marshal it back to its own thread.
 
         kind is "ping" (-> device info dict), "read" (-> ParamField) or
         "write" (-> ParamField, re-read after the write to confirm it took).
 
-        `settle` overrides how long to wait between writing and reading back.
-        Settings need the default; command fields answer at once, so they
-        pass something short to keep the UI responsive.
+        A write is verified by reading the field back until it reports the
+        value asked for, or until the job's deadline passes - the module
+        gives no signal of its own, and how long it takes to apply depends
+        on the field.
         """
-        self._jobs.put(_ParamJob(kind, index, value, on_done, settle, width))
+        self._jobs.put(_ParamJob(kind, index, value, on_done, width))
 
     def busy(self):
         return self._job is not None or not self._jobs.empty()

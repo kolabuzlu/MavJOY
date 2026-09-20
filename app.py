@@ -1187,7 +1187,7 @@ class App(tk.Tk):
         self.module_info_lbl.config(text=f"running {field.name} ...")
         self.log("info", f"Module: running {field.name}")
         self.link.submit("write", index=index, value=crsf.CMD_START,
-                         settle=0.1, on_done=self._module_cb("cmd"))
+                         on_done=self._module_cb("cmd"))
 
     def _command_reply(self, field):
         """Step through the state machine the module drives for commands."""
@@ -1209,7 +1209,7 @@ class App(tk.Tk):
                 field.name, field.info or f"Confirm {field.name}?")
             reply = crsf.CMD_CONFIRM if ok else crsf.CMD_CANCEL
             self.link.submit("write", index=field.index, value=reply,
-                             settle=0.1, on_done=self._module_cb("cmd"))
+                             on_done=self._module_cb("cmd"))
             return
 
         self._cmd_index = None
@@ -1225,7 +1225,7 @@ class App(tk.Tk):
         self._cmd_index = None
         if self.link and self.link.running:
             self.link.submit("write", index=field.index,
-                             value=crsf.CMD_CANCEL, settle=0.1)
+                             value=crsf.CMD_CANCEL)
         message = (f"CH{armed[0]} went armed while {field.name} was waiting "
                    f"to {stage}, so it was cancelled.")
         self.module_info_lbl.config(text=f"{field.name}: cancelled, armed")
@@ -1240,7 +1240,7 @@ class App(tk.Tk):
         if field is not None and self._cancel_if_armed(field, "finish"):
             return
         self.link.submit("write", index=index, value=crsf.CMD_POLL,
-                         settle=0.1, on_done=self._module_cb("cmd"))
+                         on_done=self._module_cb("cmd"))
 
     def stop_link(self, reason=""):
         if self.link:

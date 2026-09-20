@@ -330,9 +330,19 @@ Changing the packet rate re-keys the link, so the receiver failsafes for a
 moment while both ends resync. The app refuses to do it while armed, and
 asks before doing it at all.
 
-A write is also not instant — ExpressLRS applies and saves it
-asynchronously, so the app waits before reading the value back. Read it too
-soon and you get the *old* value, which looks exactly like a rejected write.
+A write is not instant, and how long it takes depends on the field.
+Measured on ELRS 4.1: Fan Thresh is already in effect 164 ms later, while
+Packet Rate — which re-keys the RF link — takes about 1.7 s. The module
+announces nothing when it is done; writing a field and listening for three
+seconds produces no unsolicited reply at all.
+
+So the app does not guess a delay. It writes once, then reads the field
+back until it reports the value asked for or a three second deadline
+passes. A quick field finishes in one round trip, a slow one gets as long
+as it needs, and a genuine refusal is still reported once the deadline
+expires. A fixed wait was wrong in both directions — too slow for quick
+fields, and short enough that a Packet Rate change that had actually
+succeeded was reported as refused.
 
 ## Failsafe
 
