@@ -418,7 +418,10 @@ Other safety behaviour:
   keeps it flying.
 - A button held down across a restart does not read as a fresh press, so a
   latch cannot flip itself while you are re-establishing the link.
-- **Esc** stops the link instantly from anywhere in the app.
+- **Esc** stops the link instantly from anywhere in the app, except
+  while a modal dialog is open — a dialog takes the keyboard, so cancel
+  it first. The link thread is unaffected either way, and the window's
+  Stop button is always live.
 - The link thread runs at raised priority, and on Windows it requests 1 ms
   timer resolution (otherwise `sleep()` granularity is ~15 ms and the frame
   rate collapses). Watch the jitter figure next to the rate.

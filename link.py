@@ -129,11 +129,11 @@ class _ParamJob:
             return crsf.device_ping_frame()
 
         if self.stage == "write":
-            # Sent once, then we watch the field rather than guessing a delay.
-            self.stage = "verify"
-            self.reader = crsf.ParamReader(self.index)
-            self._verify_until = now + self.VERIFY_DEADLINE
-            self._next_verify = 0.0
+            # The frame is built here but the stage does not move until the
+            # caller confirms it actually went out. Advancing first meant a
+            # write that never left the PC - a serial timeout on a busy CDC
+            # endpoint - was followed by read-backs of the unchanged value
+            # and reported to the pilot as the module refusing the setting.
             return crsf.param_write_frame(self.index, self.value, self.width)
 
         if self.stage == "verify" and now < self._next_verify:
@@ -143,6 +143,14 @@ class _ParamJob:
             return self.reader.next_request()
 
         return None
+
+    def sent(self, now):
+        """Called once the frame request() produced has reached the port."""
+        if self.stage == "write":
+            self.stage = "verify"
+            self.reader = crsf.ParamReader(self.index)
+            self._verify_until = now + self.VERIFY_DEADLINE
+            self._next_verify = 0.0
 
     def feed(self, ftype, payload):
         if self.stage == "ping":
@@ -362,6 +370,13 @@ class CrsfLink(threading.Thread):
         states = self.gamepad.states
         stale_slot, st = self._first_stale(states)
 
+        # Computed on every tick, reporting or not. The mixer then always
+        # holds a current picture - which is what the arm interlock reads -
+        # and devices that ARE still reporting keep their edges tracked.
+        # Only the write below is gated on freshness. This also keeps the
+        # GUI out of the mixer: one thread owns it while a link exists.
+        values = self.mixer.compute(states)
+
         if stale_slot is not None:
             if self.transmitting:
                 where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
@@ -386,13 +401,13 @@ class CrsfLink(threading.Thread):
             # latched arm switch that was on is still on, and clearing it
             # would command a disarm.
             self._read_telemetry()
+            self._expire_jobs()
             return
 
         if not self.transmitting:
             self.transmitting = True
             self.on_event("info", "Transmitting channel data")
 
-        values = self.mixer.compute(states)
         frame = crsf.pack_rc_channels(values, sync=self.sync_byte)
         try:
             self._ser.write(frame)
@@ -498,6 +513,28 @@ class CrsfLink(threading.Thread):
         """
         self._clear_warning.set()
 
+    def _expire_jobs(self):
+        """Fail settings jobs while the input is down, without writing.
+
+        This path has to stay silent, but a job still has to end rather than
+        hang: the GUI disables its button until the callback comes back, and
+        the deadline is only ever evaluated in _service_jobs, which does not
+        run here.
+        """
+        reason = "input stopped before the module answered"
+        if self._job is not None and time.monotonic() >= self._job_expiry:
+            self._finish_job(None, reason)
+        while True:
+            try:
+                job = self._jobs.get_nowait()
+            except queue.Empty:
+                return
+            if job.on_done is not None:
+                try:
+                    job.on_done(None, "input is down; not talking to the module")
+                except Exception:
+                    pass
+
     def _service_jobs(self):
         now = time.monotonic()
 
@@ -518,8 +555,15 @@ class CrsfLink(threading.Thread):
             if frame:
                 try:
                     self._ser.write(frame)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Count it and say so. Swallowing this made a write that
+                    # never left look exactly like the module refusing it.
+                    with self._lock:
+                        self.stats.write_errors += 1
+                        self.stats.last_error = str(exc)
+                    self._finish_job(None, f"could not reach the module ({exc})")
+                    return
+                self._job.sent(now)
             self._job_next_send = now + self.JOB_RESEND
 
     def _feed_job(self, ftype, payload):

@@ -555,6 +555,13 @@ class App(tk.Tk):
         self.hat_lbl = ttk.Label(tab, text="hats: —")
         self.hat_lbl.pack(anchor="w", padx=12, pady=4)
 
+        # Traced rather than bound to the combobox event: the shown slot
+        # is also changed in code, by _refresh_input_slots when a device
+        # disappears, and a programmatic set fires no event. Without this
+        # the boxes keep showing one device while edits land on another.
+        self.input_slot.trace_add("write",
+                                  lambda *_a: self.refresh_deadzone_boxes())
+
     def _watch_devices(self):
         """Redraw the device pickers when something is plugged or unplugged.
 
@@ -596,6 +603,8 @@ class App(tk.Tk):
 
     def refresh_deadzone_boxes(self, _evt=None):
         """Repoint the boxes when the shown device changes."""
+        if not getattr(self, "axis_widgets", None):
+            return              # the traced variable can fire before the tab exists
         slot = self._shown_slot()
         for n, w in enumerate(self.axis_widgets):
             w["dz"].set(f"{self.mixer.deadzone_for(slot, n):.2f}")
@@ -802,26 +811,42 @@ class App(tk.Tk):
             w["steps_spin"].config(state="disabled")
 
     def on_channel_changed(self, n):
+        """Rebuild a channel from the widgets and swap it in as one object.
+
+        Everything is parsed before anything is applied. Assigning field by
+        field meant a bad index left the channel carrying its new source with
+        the old index and device - live, because the link thread reads these
+        objects at up to 500 Hz - and skipped the config write, so the saved
+        map and the running one silently disagreed. Replacing the list entry
+        is a single assignment: the link thread sees the old channel or the
+        new one, never a half-built mixture.
+        """
         w = self.ch_widgets[n]
-        ch = self.mixer.channels[n]
+        old = self.mixer.channels[n]
         try:
-            ch.src = w["src"].get()
-            raw = str(w["idx"].get()).strip().lower()
-            if raw not in ("", self.NO_INDEX):
-                # The box reads "none" for sources that take no index;
-                # that is the widget being blanked, not a request for 0.
-                ch.idx = max(0, int(raw))
-            ch.inv = bool(w["inv"].get())
-            ch.dev = int(w["dev"].get())
-            ch.arm = bool(w["arm"].get())
+            raw_idx = str(w["idx"].get()).strip().lower()
             raw_steps = str(w["steps"].get()).strip().lower()
-            if raw_steps not in ("", self.NO_INDEX):
-                ch.steps = max(2, min(6, int(raw_steps)))
+            # The boxes read "none" for whatever the source does not use;
+            # that is the widget being blanked, not a request for zero.
+            new = gp.ChannelMap(
+                src=w["src"].get(),
+                idx=old.idx if raw_idx in ("", self.NO_INDEX)
+                    else max(0, int(raw_idx)),
+                inv=bool(w["inv"].get()),
+                dev=int(w["dev"].get()),
+                arm=bool(w["arm"].get()),
+                value=old.value,
+                steps=old.steps if raw_steps in ("", self.NO_INDEX)
+                      else max(2, min(6, int(raw_steps))),
+                buttons=old.buttons)
         except (tk.TclError, ValueError):
-            return
+            return              # nothing applied; the channel is as it was
+
+        self.mixer.forget_latches(old)
+        self.mixer.channels[n] = new
         self._sync_row_widgets(n)
-        self.cfg["channels"][n] = ch.to_dict()
-        self.src_help.config(text=f"{ch.src}: {gp.SOURCE_HELP.get(ch.src, '')}")
+        self.cfg["channels"][n] = new.to_dict()
+        self.src_help.config(text=f"{new.src}: {gp.SOURCE_HELP.get(new.src, '')}")
 
     def on_throttle_changed(self, _evt=None):
         t = self.cfg["throttle"]
@@ -884,27 +909,8 @@ class App(tk.Tk):
         # model that is still in the air, that frame is a disarm command.
         # The controls are read exactly as they stand, and anything that
         # would surprise the pilot is put to them instead.
-        self.mixer.resync(states)
-        values = self.mixer.compute(states)
-
-        concerns = []
-        for i, ch in enumerate(self.mixer.channels):
-            if ch.src == "throttle" and values[i] > crsf.CHANNEL_MIN + 20:
-                concerns.append(f"CH{i + 1} throttle at "
-                                f"{crsf.crsf_to_us(values[i]):.0f} us")
-        for n in self.mixer.armed_channels():
-            concerns.append(f"CH{n} armed")
-
-        if concerns:
-            if not messagebox.askokcancel(
-                    "Check before starting",
-                    f"The first frame will carry: {', '.join(concerns)}. "
-                    f"On the bench, set those controls off and start again. "
-                    f"If you are reconnecting to a model that is already "
-                    f"flying, this is exactly what keeps it flying - "
-                    f"starting with them off would command a disarm. "
-                    f"Start now?"):
-                return
+        if not self._confirm_first_frame():
+            return
 
         try:
             baud = int(self.baud_var.get())
@@ -1092,7 +1098,7 @@ class App(tk.Tk):
                        lambda _e, i=index: self._on_select_changed(i))
             self._field_vars[index] = var
 
-        elif field.type in crsf._NUMERIC:
+        elif field.type in crsf._NUMERIC and field.vmin is not None:
             var = tk.StringVar(value=str(field.value))
             spin = ttk.Spinbox(body, from_=field.vmin, to=field.vmax, width=10,
                                textvariable=var)
@@ -1141,16 +1147,18 @@ class App(tk.Tk):
             return False
         if not (self.link and self.link.running):
             return False
-        if self.link.transmitting:
-            # Some settings re-key the RF link. Ask while channel data is
-            # actually going out, whatever the field is, rather than
-            # keeping a list of which fields are dangerous.
-            return messagebox.askokcancel(
-                "Change a module setting?",
-                f"Change {what} while the link is live? Some settings "
-                f"re-key the RF link, so the receiver drops out and goes "
-                f"to failsafe for a moment. Props off.")
-        return True
+        # Ask whenever the link is up, not only while frames are flowing. A
+        # write reaches the module either way, and the window where they have
+        # stopped is the dangerous one: the model is already in failsafe and
+        # re-keying the link is the last thing it needs.
+        state = ("while the link is live"
+                 if self.link.transmitting else
+                 "while the input is down and the model is in failsafe")
+        return messagebox.askokcancel(
+            "Change a module setting?",
+            f"Change {what} {state}? Some settings re-key the RF link, so "
+            f"the receiver drops out and goes to failsafe for a moment. "
+            f"Props off.")
 
     def _write_field(self, index, value, description):
         self._pending_write = (index, value)
@@ -1226,7 +1234,18 @@ class App(tk.Tk):
             return
         if value == field.value:
             return
-        if field.vmin is not None and not (field.vmin <= value <= field.vmax):
+        if field.vmin is None or field.vmax is None:
+            # A truncated entry parses a value but no limits. Refusing is the
+            # only safe answer: without limits there is nothing to check the
+            # number against, and this writes straight to the module.
+            messagebox.showwarning(
+                "Incomplete setting",
+                f"{field.name} did not read back completely, so its limits "
+                f"are unknown and it cannot be changed. Read the settings "
+                f"again.")
+            var.set(str(field.value))
+            return
+        if not (field.vmin <= value <= field.vmax):
             messagebox.showwarning(
                 "Out of range",
                 f"{field.name} accepts {field.vmin} to {field.vmax}.")
@@ -1267,22 +1286,83 @@ class App(tk.Tk):
             return
 
         if field.status == crsf.CMD_CONFIRMATION_NEEDED:
-            # The link keeps running while the dialog is up, so the model can
-            # be armed between Run and OK. Re-check rather than trusting the
-            # check run_command did.
-            if self._cancel_if_armed(field, "confirm"):
-                return
-            ok = messagebox.askokcancel(
-                field.name, field.info or f"Confirm {field.name}?")
-            reply = crsf.CMD_CONFIRM if ok else crsf.CMD_CANCEL
-            self.link.submit("write", index=field.index, value=reply,
-                             on_done=self._module_cb("cmd"))
+            # Handed to a fresh callback rather than opened here. This runs
+            # inside the periodic tick, which only reschedules itself after
+            # it returns, so a modal raised on this stack freezes every live
+            # indicator - the ARM chip and the LQ chip included - for as long
+            # as the box is up.
+            self.after(0, lambda f=field: self._confirm_command(f))
             return
 
         self._cmd_index = None
         outcome = field.info or "done"
         self.module_info_lbl.config(text=f"{field.name}: {outcome}")
         self.log("info", f"Module: {field.name} finished ({outcome})")
+
+    def _first_frame_concerns(self):
+        """Re-read the controls and describe what the first frame would carry."""
+        states = self.gamepad.states
+        self.mixer.resync(states)
+        values = self.mixer.compute(states)
+        concerns = []
+        for i, ch in enumerate(self.mixer.channels):
+            if ch.src == "throttle" and values[i] > crsf.CHANNEL_MIN + 20:
+                concerns.append(f"CH{i + 1} throttle at "
+                                f"{crsf.crsf_to_us(values[i]):.0f} us")
+        for n in self.mixer.armed_channels():
+            concerns.append(f"CH{n} armed")
+        return concerns
+
+    def _confirm_first_frame(self):
+        """The one gate before a link goes live.
+
+        Evaluated, asked, and then evaluated AGAIN, because the dialog blocks
+        and a throttle can be pushed while it is open - so the sentence the
+        pilot agreed to has to still be true. The default button is Cancel:
+        this is the only thing standing between a held throttle and spinning
+        props, and it should not be dismissable with a reflexive Return.
+        """
+        concerns = self._first_frame_concerns()
+        if not concerns:
+            return True
+        if not messagebox.askokcancel(
+                "Check before starting",
+                f"The first frame will carry: {', '.join(concerns)}. "
+                f"On the bench, set those controls off and start again. "
+                f"If you are reconnecting to a model that is already "
+                f"flying, this is exactly what keeps it flying - starting "
+                f"with them off would command a disarm. Start now?",
+                default=messagebox.CANCEL, icon=messagebox.WARNING):
+            return False
+        after = self._first_frame_concerns()
+        if after != concerns:
+            messagebox.showwarning(
+                "Controls moved",
+                f"The controls changed while that was open - now "
+                f"{', '.join(after) if after else 'nothing is flagged'}. "
+                f"Nothing was started; press Start again.")
+            return False
+        return True
+
+    def _confirm_command(self, field):
+        """Ask about a command the module is waiting on, off the tick stack."""
+        if self.link is None or not self.link.running:
+            self._cmd_index = None
+            return
+        # The link keeps running while the dialog is up, so the model can be
+        # armed between Run and OK. Check before, and again after.
+        if self._cancel_if_armed(field, "confirm"):
+            return
+        ok = messagebox.askokcancel(
+            field.name, field.info or f"Confirm {field.name}?")
+        if ok and self._cancel_if_armed(field, "confirm"):
+            return
+        if self.link is None or not self.link.running:
+            self._cmd_index = None
+            return
+        reply = crsf.CMD_CONFIRM if ok else crsf.CMD_CANCEL
+        self.link.submit("write", index=field.index, value=reply,
+                         on_done=self._module_cb("cmd"))
 
     def _cancel_if_armed(self, field, stage):
         """Abandon a command in progress if the model became armed."""
@@ -1373,13 +1453,15 @@ class App(tk.Tk):
         # nothing else is touching it, so recompute here: that keeps
         # last_values - and therefore the arm interlock - current, instead
         # of frozen at whatever it held the instant the input died.
-        if transmitting:
+        if link_active:
+            # The link thread owns the mixer and computes on every tick, so
+            # last_values is always current - including through an outage,
+            # where it holds what was last actually seen. The GUI must not
+            # compute here: two threads in compute() race on the latches and
+            # can swallow an arm press at the moment transmission resumes.
             values = list(self.mixer.last_values)
-        elif any(st.is_fresh() for st in states.values()):
-            values = self.mixer.compute(states)
         else:
-            values = self.mixer.failsafe_values()
-            self.mixer.last_values = list(values)
+            values = self.mixer.compute(states)
 
         for i, w in enumerate(self.ch_widgets):
             v = values[i]
@@ -1604,7 +1686,7 @@ class App(tk.Tk):
         self.thr_dz.set(t["deadzone"])
         self.baud_var.set(str(self.cfg["baud"]))
         for n, w in enumerate(self.axis_widgets):
-            w["dz"].set(f"{self.mixer.deadzone_for(0, n):.2f}")
+            w["dz"].set(f"{self.mixer.deadzone_for(self._shown_slot(), n):.2f}")
         self.dz_all.set(f"{self.cfg.get('deadzone', 0.05):.2f}")
         self.rate_var.set(self.cfg["rate_hz"])
         self.rate_auto.set(bool(self.cfg.get("rate_auto", True)))

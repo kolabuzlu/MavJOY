@@ -41,6 +41,10 @@ import pygame  # noqa: E402  (must come after the env vars above)
 
 STALE_INPUT_SEC = 0.15  # no fresh gamepad data for this long -> cut the link
 
+# Shared singletons: compute() runs up to 500 times a second and these
+# were being rebuilt on every call.
+_NO_EDGES = frozenset()
+
 
 @dataclass
 class InputState:
@@ -56,6 +60,9 @@ class InputState:
 
     def is_fresh(self) -> bool:
         return self.connected and self.age() < STALE_INPUT_SEC
+
+
+_BLANK_STATE = InputState()
 
 
 class GamepadThread(threading.Thread):
@@ -82,6 +89,7 @@ class GamepadThread(threading.Thread):
         self._stop_event = threading.Event()
         self._joys = {}              # slot -> pygame joystick
         self._open_index = {}        # slot -> device index actually open
+        self._probe = {}             # index -> handle kept open just to name it
         self.error = ""
 
     # ---------------------------------------------------------- public API
@@ -180,26 +188,14 @@ class GamepadThread(threading.Thread):
                     self._rescan.set()
 
             if self._rescan.is_set():
+                # Cleared before the work, never after. Clearing afterwards
+                # would swallow a select() the GUI raised while the scan was
+                # running, leaving the picker showing a device the thread
+                # never opened. The echo-dropping that used to sit here went
+                # with the subsystem re-init that caused the echoes.
                 self._rescan.clear()
                 self._scan()
                 self._resolve_slots()
-                # Re-initialising the joystick subsystem makes SDL announce
-                # every device all over again. Those are echoes of the rescan
-                # we just did, not new hardware, and acting on them schedules
-                # another scan immediately - the thread then re-enumerates
-                # forever and starves everything else of the interpreter.
-                # Anything that genuinely arrived is already in the list just
-                # built, so the echoes are safe to drop.
-                pygame.event.clear(pygame.JOYDEVICEADDED)
-                pygame.event.clear(pygame.JOYDEVICEREMOVED)
-                self._rescan.clear()
-                # ...unless a device moved while we were looking, which the
-                # count catches without another full re-enumeration.
-                try:
-                    if pygame.joystick.get_count() != len(self.device_list):
-                        self._rescan.set()
-                except Exception:
-                    pass
 
             self._poll()
 
@@ -215,25 +211,42 @@ class GamepadThread(threading.Thread):
 
     # ------------------------------------------------------------ internal
     def _scan(self):
-        pygame.joystick.quit()
-        pygame.joystick.init()
+        """Refresh the device list.
+
+        This runs on the polling thread, so it has to be quick: a scan that
+        takes longer than STALE_INPUT_SEC makes the input it is not reading
+        look dead, and the link stops transmitting because somebody plugged
+        in a USB stick. Two things used to make it slow. Re-initialising the
+        joystick subsystem cost about 40 ms and made SDL re-announce every
+        device, which fed straight back into another rescan; SDL keeps the
+        list current from the events already pumped in run(), so it is gone.
+        And opening a device to read its name costs about 50 ms each, so
+        handles are kept and reused rather than reopened every time.
+        """
         devices = []
         for i in range(pygame.joystick.get_count()):
+            joy = self._probe.get(i)
+            if joy is None:
+                try:
+                    joy = pygame.joystick.Joystick(i)
+                except Exception:
+                    joy = None
             name, guid = f"device {i}", ""
-            try:
-                joy = pygame.joystick.Joystick(i)
-                name = joy.get_name()
-                guid = joy.get_guid()
-            except Exception:
-                pass
+            if joy is not None:
+                try:
+                    name, guid = joy.get_name(), joy.get_guid()
+                    self._probe[i] = joy
+                except Exception:          # handle went stale with the device
+                    self._probe.pop(i, None)
             devices.append({"index": i, "name": name, "guid": guid})
+        for gone in [i for i in self._probe if i >= len(devices)]:
+            self._probe.pop(gone, None)
         with self._lock:
             if devices != self._devices:
                 self.devices_seq += 1
             self._devices = devices
-        # a rescan invalidates every handle we held
-        self._joys = {}
-        self._open_index = {}
+        # Handles survive now that the subsystem is not torn down; slots are
+        # only reopened when _resolve_slots actually points them somewhere new.
 
     def _resolve_slots(self):
         """Re-point every slot at the device it was told to hold.
@@ -255,15 +268,22 @@ class GamepadThread(threading.Thread):
 
     @staticmethod
     def _match(devices, ident, fallback_index, taken):
-        if ident:
-            for key in ("guid", "name"):
-                want = ident.get(key)
-                if not want:
-                    continue
-                for d in devices:
-                    if d[key] == want and d["index"] not in taken:
-                        return d["index"]
+        named = False
+        for key in ("guid", "name"):
+            want = (ident or {}).get(key)
+            if not want:
+                continue
+            named = True
+            for d in devices:
+                if d[key] == want and d["index"] not in taken:
+                    return d["index"]
+        if named:
             return None          # it was named, and it is not here
+
+        # No identity, or one carrying nothing but an index - which is what a
+        # config written before identity matching holds, and what the shipped
+        # default is. Fall back to the position, then remember what was found
+        # there so the next start matches on identity instead.
         if fallback_index is not None:
             for d in devices:
                 if d["index"] == fallback_index and d["index"] not in taken:
@@ -271,6 +291,8 @@ class GamepadThread(threading.Thread):
         return None
 
     def _open(self, slot, index):
+        if index is not None and self._open_index.get(slot) == index:
+            return                       # already pointed there; leave it be
         self._close(slot)
         if index is None:
             return
@@ -602,6 +624,23 @@ class Mixer:
                 continue
         return out
 
+    def forget_latches(self, ch):
+        """Drop the latch state belonging to a channel that is being replaced.
+
+        Latch keys are derived from the channel - a switch keys on its
+        resolved button list - so editing steps or the index orphans the old
+        entry, and the channel then falls back to a default instead of the
+        position it was actually holding. Clearing it means the next compute
+        re-reads the hardware, which for switch and button sources is the
+        real position anyway.
+        """
+        self._toggles.pop((ch.dev, ch.idx), None)
+        self._cycles.pop((ch.dev, ch.idx), None)
+        try:
+            self._switches.pop((ch.dev, tuple(ch.switch_buttons())), None)
+        except Exception:
+            pass
+
     def deadzone_for(self, dev: int, axis: int) -> float:
         """The deadzone for one axis of one device, falling back to the
         pad-wide value. Keyed by device for the same reason the latches are:
@@ -655,23 +694,43 @@ class Mixer:
 
     def compute(self, states):
         """Evaluate every channel. `states` is {slot: InputState}; a bare
-        InputState is accepted and treated as slot 0."""
+        InputState is accepted and treated as slot 0.
+
+        A device that is not reporting is SKIPPED, not read as a device with
+        nothing pressed. Reading it would overwrite that slot's edge memory
+        with "no buttons held", so every button still physically down would
+        look like a fresh press the moment it came back - and on an arm
+        toggle a fresh press means a disarm. Its channels hold the value
+        last seen instead: "we do not know" is nearer the truth than
+        "everything is off", and the arm interlock reads these values.
+        """
         if isinstance(states, InputState):
             states = {0: states}
         now = time.monotonic()
         dt = 0.0 if self._last_t is None else min(now - self._last_t, 0.1)
         self._last_t = now
 
-        blank = InputState()
+        live = {slot: st for slot, st in states.items() if st.is_fresh()}
         edges = {slot: self._rising_edges(slot, st.buttons)
-                 for slot, st in states.items()}
-        thr = self.throttle.update(states.get(self.throttle_dev) or blank, dt)
+                 for slot, st in live.items()}
 
+        thr_state = live.get(self.throttle_dev)
+        if thr_state is None:
+            # Hold. Integrating a throttle nobody is touching would ramp it
+            # up through the outage and transmit that on the first frame back.
+            thr = self.throttle.value
+        else:
+            thr = self.throttle.update(thr_state, dt)
+
+        previous = self.last_values
         vals = []
-        for ch in self.channels:
-            st = states.get(ch.dev) or blank
-            vals.append(self._channel_value(ch, st, thr,
-                                            edges.get(ch.dev, frozenset())))
+        for i, ch in enumerate(self.channels):
+            st = live.get(ch.dev)
+            if st is None and ch.src not in ("none", "fixed"):
+                vals.append(previous[i] if i < len(previous) else crsf.CHANNEL_MID)
+                continue
+            vals.append(self._channel_value(ch, st or _BLANK_STATE, thr,
+                                            edges.get(ch.dev, _NO_EDGES)))
         self.last_values = vals
         return vals
 
