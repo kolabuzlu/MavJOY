@@ -89,7 +89,6 @@ class GamepadThread(threading.Thread):
         self._stop_event = threading.Event()
         self._joys = {}              # slot -> pygame joystick
         self._open_index = {}        # slot -> device index actually open
-        self._probe = {}             # index -> handle kept open just to name it
         self.error = ""
 
     # ---------------------------------------------------------- public API
@@ -183,19 +182,44 @@ class GamepadThread(threading.Thread):
             # get(), not pump(): pump processes the queue and throws it away,
             # and SDL is already telling us when a device arrives or leaves.
             for event in pygame.event.get():
-                if event.type in (pygame.JOYDEVICEADDED,
-                                  pygame.JOYDEVICEREMOVED):
+                if event.type == pygame.JOYDEVICEREMOVED:
+                    # Close the handle here and now. SDL does NOT invalidate
+                    # an open joystick when its device leaves: reads keep
+                    # succeeding and quietly return zeros, so a slot would go
+                    # on publishing fresh-looking data for hardware that is
+                    # not there - and nothing downstream would ever see it as
+                    # stale, so the link would keep transmitting and the model
+                    # would never reach failsafe.
+                    self._device_removed(getattr(event, "instance_id", None))
+                    self._rescan.set()
+                elif event.type == pygame.JOYDEVICEADDED:
                     self._rescan.set()
 
             if self._rescan.is_set():
-                # Cleared before the work, never after. Clearing afterwards
+                # Cleared before the work, never after: clearing afterwards
                 # would swallow a select() the GUI raised while the scan was
                 # running, leaving the picker showing a device the thread
-                # never opened. The echo-dropping that used to sit here went
-                # with the subsystem re-init that caused the echoes.
+                # never opened.
                 self._rescan.clear()
                 self._scan()
                 self._resolve_slots()
+                # _scan tears the subsystem down and back up, and SDL
+                # announces every device again when it does. Those are echoes
+                # of the scan just finished, not hardware changing - and
+                # treating them as real closes every slot and schedules
+                # another scan, forever. A genuine change that lands in this
+                # window is caught by the count check below instead.
+                pygame.event.clear(pygame.JOYDEVICEADDED)
+                pygame.event.clear(pygame.JOYDEVICEREMOVED)
+
+            # Independent of the events above, because losing a removal
+            # would leave a slot reporting hardware that is gone. get_count()
+            # is a cheap SDL call and it disagrees the moment a device goes.
+            try:
+                if pygame.joystick.get_count() != len(self._devices):
+                    self._rescan.set()
+            except Exception:
+                pass
 
             self._poll()
 
@@ -213,40 +237,34 @@ class GamepadThread(threading.Thread):
     def _scan(self):
         """Refresh the device list.
 
-        This runs on the polling thread, so it has to be quick: a scan that
-        takes longer than STALE_INPUT_SEC makes the input it is not reading
-        look dead, and the link stops transmitting because somebody plugged
-        in a USB stick. Two things used to make it slow. Re-initialising the
-        joystick subsystem cost about 40 ms and made SDL re-announce every
-        device, which fed straight back into another rescan; SDL keeps the
-        list current from the events already pumped in run(), so it is gone.
-        And opening a device to read its name costs about 50 ms each, so
-        handles are kept and reused rather than reopened every time.
+        This tears the joystick subsystem down and brings it back up, which
+        is slower than enumerating in place and briefly starves the polling
+        loop. It is done that way deliberately. SDL does not invalidate an
+        open handle when its device is unplugged - reads keep succeeding and
+        return zeros - so without the teardown a slot goes on publishing
+        fresh-looking data for hardware that is not there, nothing ever reads
+        as stale, and the model never reaches failsafe. Caching handles to
+        avoid the cost was tried and produced exactly that, plus a segfault
+        when two owners quit the same handle. Correctness first; the removal
+        event below catches the common case long before this runs.
         """
+        pygame.joystick.quit()
+        pygame.joystick.init()
+        self._joys = {}
+        self._open_index = {}
         devices = []
         for i in range(pygame.joystick.get_count()):
-            joy = self._probe.get(i)
-            if joy is None:
-                try:
-                    joy = pygame.joystick.Joystick(i)
-                except Exception:
-                    joy = None
             name, guid = f"device {i}", ""
-            if joy is not None:
-                try:
-                    name, guid = joy.get_name(), joy.get_guid()
-                    self._probe[i] = joy
-                except Exception:          # handle went stale with the device
-                    self._probe.pop(i, None)
+            try:
+                joy = pygame.joystick.Joystick(i)
+                name, guid = joy.get_name(), joy.get_guid()
+            except Exception:
+                pass
             devices.append({"index": i, "name": name, "guid": guid})
-        for gone in [i for i in self._probe if i >= len(devices)]:
-            self._probe.pop(gone, None)
         with self._lock:
             if devices != self._devices:
                 self.devices_seq += 1
             self._devices = devices
-        # Handles survive now that the subsystem is not torn down; slots are
-        # only reopened when _resolve_slots actually points them somewhere new.
 
     def _resolve_slots(self):
         """Re-point every slot at the device it was told to hold.
@@ -290,9 +308,25 @@ class GamepadThread(threading.Thread):
                     return d["index"]
         return None
 
+    @staticmethod
+    def _instance_of(joy):
+        try:
+            return joy.get_instance_id()
+        except Exception:
+            return None
+
+    def _device_removed(self, instance_id):
+        """Close the slot holding a device that has just been removed.
+
+        A fast path ahead of the rescan: the slot reads as disconnected on
+        the very next poll rather than waiting for the re-enumeration, so the
+        link stops transmitting promptly.
+        """
+        for slot, joy in list(self._joys.items()):
+            if instance_id is None or self._instance_of(joy) == instance_id:
+                self._close(slot)
+
     def _open(self, slot, index):
-        if index is not None and self._open_index.get(slot) == index:
-            return                       # already pointed there; leave it be
         self._close(slot)
         if index is None:
             return
