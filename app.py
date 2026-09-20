@@ -878,17 +878,32 @@ class App(tk.Tk):
                     "anyway to test the link itself?"):
                 return
 
-        # safety: reset every latch, then verify the throttle really is at idle
-        self.mixer.reset()
+        # Nothing here forces a control to a "safe" value. Clearing the
+        # latches would put arm low and the throttle at idle in the very
+        # first frame, and when the link is being restarted to recover a
+        # model that is still in the air, that frame is a disarm command.
+        # The controls are read exactly as they stand, and anything that
+        # would surprise the pilot is put to them instead.
+        self.mixer.resync(states)
         values = self.mixer.compute(states)
-        thr_channels = [i for i, c in enumerate(self.mixer.channels)
-                        if c.src == "throttle"]
-        for i in thr_channels:
-            if values[i] > crsf.CHANNEL_MIN + 20:
-                messagebox.showwarning(
-                    "Throttle not at idle",
-                    f"CH{i + 1} reads {values[i]} ({crsf.crsf_to_us(values[i]):.0f}\u00b5s).\n\n"
-                    "Release the throttle input and try again.")
+
+        concerns = []
+        for i, ch in enumerate(self.mixer.channels):
+            if ch.src == "throttle" and values[i] > crsf.CHANNEL_MIN + 20:
+                concerns.append(f"CH{i + 1} throttle at "
+                                f"{crsf.crsf_to_us(values[i]):.0f} us")
+        for n in self.mixer.armed_channels():
+            concerns.append(f"CH{n} armed")
+
+        if concerns:
+            if not messagebox.askokcancel(
+                    "Check before starting",
+                    f"The first frame will carry: {', '.join(concerns)}. "
+                    f"On the bench, set those controls off and start again. "
+                    f"If you are reconnecting to a model that is already "
+                    f"flying, this is exactly what keeps it flying - "
+                    f"starting with them off would command a disarm. "
+                    f"Start now?"):
                 return
 
         try:

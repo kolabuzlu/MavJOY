@@ -608,8 +608,32 @@ class Mixer:
         a worn stick on one pad must not deaden another device's axis."""
         return self.axis_deadzone.get((dev, axis), self.deadzone)
 
+    def resync(self, states):
+        """Prepare to start transmitting without moving a single control.
+
+        Deliberately does NOT clear the latches or the throttle. Doing that
+        puts arm low and throttle at idle in the very first frame, and when
+        the link is being restarted to recover a model that is already in
+        the air - the whole point of restarting after a failsafe - that
+        first frame is a disarm command. The controls are read exactly as
+        they stand; it is for the pilot to decide whether that is what they
+        want, and start_link asks them.
+
+        Only the edge detector and the timebase are refreshed, so a button
+        held across the gap does not read as a fresh press and flip a latch.
+        """
+        if isinstance(states, InputState):
+            states = {0: states}
+        self._prev_buttons = {slot: tuple(st.buttons)
+                              for slot, st in states.items()}
+        self._last_t = None
+
     def reset(self):
-        """Called before a link is started: everything back to a safe state."""
+        """Wipe every latch and the throttle back to their power-on state.
+
+        For a genuinely fresh start only - opening the app, loading a config.
+        Never on the way into a link: see resync().
+        """
         self._toggles.clear()
         self._cycles.clear()
         self._switches.clear()

@@ -404,7 +404,17 @@ Other safety behaviour:
   and a write attempted while the link is live asks first. A command that
   pauses for confirmation re-checks on the way through, so it cannot
   complete against a model armed while the dialog was open.
-- A link will not start unless throttle reads 0 % and every latch is reset.
+- **Starting a link never moves a control.** It reads the sticks and
+  switches as they stand and shows you what the first frame will carry if
+  anything looks wrong — a throttle off idle, a channel already armed — for
+  you to accept or cancel. It deliberately does not force them to a safe
+  value: clearing the latches would put arm low and throttle at idle in
+  that first frame, and when you are restarting the link to recover a model
+  that is still in the air, that frame is a disarm command. On the bench,
+  set the controls off and start again; in the air, those readings are what
+  keeps it flying.
+- A button held down across a restart does not read as a fresh press, so a
+  latch cannot flip itself while you are re-establishing the link.
 - **Esc** stops the link instantly from anywhere in the app.
 - The link thread runs at raised priority, and on Windows it requests 1 ms
   timer resolution (otherwise `sleep()` granularity is ~15 ms and the frame
