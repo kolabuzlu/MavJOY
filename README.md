@@ -168,6 +168,26 @@ ExpressLRS refuses settings it considers invalid for the current
 configuration rather than reporting an error, so the app always shows what
 the module says it is on, not what was asked for.
 
+### Settings the module will not change
+
+Two constraints cause most of the confusion, and neither produces an error
+message — ExpressLRS simply keeps the old value:
+
+**The CRSF baud decides which packet rates exist.** At 115200 a
+BFPV 2G4Micro1W offers 50, 100 Full, 150, 250 and D250, with two entries
+blanked out. At 921600 the same module offers ten: 333Hz Full, 500Hz, D500,
+F500 and F1000 appear as well. Nothing is wrong with the module — the
+handset link cannot feed those rates, so it hides them. The Module tab says
+how many are hidden and suggests raising the baud.
+
+**Switch Mode depends on the packet rate**, and changes with it. At
+100Hz Full the options are `8ch`, `16ch Rate/2`, `12ch Mixed`; at 150Hz the
+same field offers `Wide` and `Hybrid`. Some combinations are refused
+outright, and a rate change can move Switch Mode on its own. If a Switch
+Mode will not take, change the packet rate first and set it there.
+
+
+
 ## Appearance
 
 MavJOY starts dark. **View > Light** switches to the system look; the choice

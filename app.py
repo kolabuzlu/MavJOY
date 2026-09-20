@@ -831,6 +831,20 @@ class App(tk.Tk):
             ttk.Label(body, text=field.unit, foreground=self.pal["muted"]).grid(
                 row=row, column=2, sticky="w", padx=6)
 
+        # ExpressLRS blanks out options the current setup cannot reach rather
+        # than reporting an error. The commonest cause by far is the CRSF baud
+        # - at 115200 it will not offer 333Hz, 500Hz or the F/D rates at all -
+        # so say that instead of quietly showing a short list.
+        elif field.type == crsf.PARAM_SELECT:
+            missing = sum(1 for lab in field.options if not lab.strip())
+            if missing:
+                baud = self.link.baud if self.link else 0
+                hint = f"{missing} more hidden at this CRSF baud"
+                if baud and baud < 921600:
+                    hint += " - try Baud 921600"
+                ttk.Label(body, text=hint, foreground=self.pal["warn"]).grid(
+                    row=row, column=2, sticky="w", padx=6)
+
     # ------------------------------------------------------------ editing
     def _may_write(self, what):
         """Nothing reaches the module while a latch says the model is armed."""
