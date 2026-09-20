@@ -13,6 +13,7 @@ as if a handset were plugged into it.
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import sys
 import time
@@ -120,11 +121,46 @@ class App(tk.Tk):
         menubar.add_cascade(label="Help", menu=helpmenu)
         self.config(menu=menubar)
 
+    LOGO_FILE = "mavjoyback.png"
+    LOGO_PX = 64            # roughly the height of the two rows beside it
+
+    def _load_logo(self, target_px):
+        """The logo, scaled to about target_px tall, or None if it is absent.
+
+        Tk scales by whole-number factors only, so the result lands near the
+        target rather than on it. A missing or unreadable file is not an
+        error: this is decoration, and the app has to start without it.
+        """
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            self.LOGO_FILE)
+        try:
+            img = tk.PhotoImage(file=path)
+        except Exception:
+            return None
+        factor = max(1, img.height() // max(1, target_px))
+        return img.subsample(factor, factor) if factor > 1 else img
+
     def _build_top(self):
         top = ttk.LabelFrame(self, text="Link")
         top.pack(fill="x", padx=8, pady=(8, 4))
 
-        row = ttk.Frame(top)
+        # The two rows leave the right-hand end of this panel empty at any
+        # sensible window width, so the logo goes there. The reference is
+        # kept on self because Tk discards an image nothing holds, which
+        # shows up as a widget that is simply blank.
+        self._logo_img = self._load_logo(self.LOGO_PX)
+        if self._logo_img is not None:
+            # The PNG has a solid black background and no alpha, so the
+            # label is told to match it rather than leaving the theme's
+            # panel colour framing a black square.
+            tk.Label(top, image=self._logo_img, bg="#000000",
+                     borderwidth=0, highlightthickness=0).pack(
+                side="right", padx=(12, 10), pady=6)
+
+        rows = ttk.Frame(top)
+        rows.pack(side="left", fill="x", expand=True)
+
+        row = ttk.Frame(rows)
         row.pack(fill="x", padx=6, pady=6)
 
         ttk.Label(row, text="Serial port").pack(side="left")
@@ -154,7 +190,7 @@ class App(tk.Tk):
         self._rate_warned = None
         self._on_rate_auto()
 
-        row2 = ttk.Frame(top)
+        row2 = ttk.Frame(rows)
         row2.pack(fill="x", padx=6, pady=(0, 6))
 
         ttk.Label(row2, text="Gamepad").pack(side="left")
