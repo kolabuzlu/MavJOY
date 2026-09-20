@@ -201,9 +201,26 @@ back in without touching refresh.
 
 ### Arming
 
-**CH5 is the arm channel.** Always, and nothing else ever is. While CH5
-reads high the app refuses to change module settings and the ARM light is
-red.
+**The ARM banner shows what the model reports**, not what we are sending.
+It reads `ARMED` in red, `DISARMED` in green, or greys out to `ARM —` when
+the model is not saying.
+
+CRSF has no armed frame. What it has is a convention: the sender appends a
+star to the flight-mode name while **disarmed**. ArduPilot only does that
+with `RC_OPTIONS` **bit 12** set (add 4096), so a mode name with no star is
+as consistent with a sender that never marks a disarm as it is with a model
+in the air. Until a star has actually been seen, the banner says nothing
+rather than guessing — an arm light reading `DISARMED` because it cannot tell
+would be worse than no arm light at all. A model sits disarmed on the ground
+before it flies, so in practice the marker is learned within seconds of
+telemetry starting. If ten seconds of flight-mode frames arrive with no star
+ever appearing, the Log says so and names the parameter.
+
+**CH5 is the arm channel** for everything MavJOY itself decides. While CH5
+reads high the app refuses to change module settings, and it refuses just
+the same when the model reports it is armed: two independent answers, either
+of which bars a write. Neither supersedes the other, because CH5 works with
+no telemetry at all while only the model knows the truth.
 
 There is no per-channel arm flag, and there used to be one. Alongside it the
 app inferred "armed" from the source type, so a flight mode latched high on
@@ -452,7 +469,7 @@ Telemetry tab:
 | `0x08` battery | 4 | voltage, current, capacity used, remaining % |
 | `0x1E` attitude | 3 | pitch, roll, yaw |
 | `0x09` baro altitude | 2 | altitude, vertical speed when the sender includes it |
-| `0x21` flight mode | 1 | the mode name, e.g. `RTL` |
+| `0x21` flight mode | 2 | the mode name, e.g. `RTL`, and the disarm marker |
 | `0x07` vario | 1 | vertical speed |
 
 **Flight mode gets its own banner**, next to LQ. It is green while the model

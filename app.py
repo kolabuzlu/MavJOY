@@ -52,6 +52,11 @@ class App(tk.Tk):
         self._field_vars = {}               # index -> the tk var editing it
         self._cmd_index = None              # command currently running
         self._telem_last = ""               # last telemetry text drawn
+        self._last_mode = None              # last flight-mode frame decoded
+        self._arm_watch = crsf.ArmWatch()   # reads armed from the mode name
+        self._armed_report = None           # True, False, or None for unknown
+        self._mode_since = 0.0              # first flight-mode frame
+        self._said_star_hint = False
         self._pending_write = None          # (field index, value) we asked for
         self._devices_seq = -1              # last device list we drew
         self._device = None                 # DEVICE_INFO from the module
@@ -1189,14 +1194,28 @@ class App(tk.Tk):
                     row=row, column=2, sticky="w", padx=6)
 
     # ------------------------------------------------------------ editing
+    def _armed_reason(self):
+        """Why a write is barred, in words, or None if it is not.
+
+        Two independent answers, and either one bars it. CH5 is what we are
+        commanding and works with no telemetry at all; the model's own
+        report is the truth but is only there when telemetry is flowing and
+        the sender marks a disarm. Neither supersedes the other.
+        """
+        if self.mixer.armed_channels():
+            return f"CH{gp.Mixer.ARM_CHANNEL} is high, so the model is armed"
+        if self._model_armed():
+            return "the model reports that it is armed"
+        return None
+
     def _may_write(self, what):
-        """Nothing reaches the module while a latch says the model is armed."""
-        armed = self.mixer.armed_channels()
-        if armed:
+        """Nothing reaches the module while anything says the model is armed."""
+        reason = self._armed_reason()
+        if reason:
             messagebox.showwarning(
                 "Armed",
-                f"CH{armed[0]} is armed. Disarm before changing {what} - "
-                f"module settings can interrupt the RF link.")
+                f"Cannot change {what}: {reason}. Disarm first - module "
+                f"settings can interrupt the RF link.")
             return False
         if not (self.link and self.link.running):
             return False
@@ -1364,6 +1383,8 @@ class App(tk.Tk):
                                 f"{crsf.crsf_to_us(values[i]):.0f} us")
         for n in self.mixer.armed_channels():
             concerns.append(f"CH{n} armed")
+        if self._model_armed():
+            concerns.append("the model reports it is armed")
         return concerns
 
     def _confirm_first_frame(self):
@@ -1419,15 +1440,15 @@ class App(tk.Tk):
 
     def _cancel_if_armed(self, field, stage):
         """Abandon a command in progress if the model became armed."""
-        armed = self.mixer.armed_channels()
-        if not armed:
+        reason = self._armed_reason()
+        if not reason:
             return False
         self._cmd_index = None
         if self.link and self.link.running:
             self.link.submit("write", index=field.index,
                              value=crsf.CMD_CANCEL)
-        message = (f"CH{armed[0]} went armed while {field.name} was waiting "
-                   f"to {stage}, so it was cancelled.")
+        message = (f"Armed while {field.name} was waiting to {stage}, so it "
+                   f"was cancelled: {reason}.")
         self.module_info_lbl.config(text=f"{field.name}: cancelled, armed")
         self.log("warn", message)
         messagebox.showwarning("Cancelled", message)
@@ -1527,11 +1548,7 @@ class App(tk.Tk):
         self.thr_bar["value"] = thr_pct
         self.thr_lbl.config(text=f"{thr_pct:3.0f} %")
 
-        armed = self.mixer.armed_channels()
-        if armed:
-            self.arm_lbl.config(text=f"ARM CH{armed[0]}: ON", bg=self.pal["danger"])
-        else:
-            self.arm_lbl.config(text="ARM: off", bg=self.pal["ok"])
+        self._set_arm(self._last_mode)
 
         # ---- link state
         if running and self.link.transmitting:
@@ -1561,7 +1578,8 @@ class App(tk.Tk):
             else:
                 self.rf_lbl.config(text="no telemetry")
                 self._set_lq(None)
-            self._set_mode(telem.get("mode"))
+            self._last_mode = telem.get("mode")
+            self._set_mode(self._last_mode)
             held = self.mixer.holding()
             if held:
                 names = ", ".join(f"CH{n}" for n in held[:6])
@@ -1579,6 +1597,7 @@ class App(tk.Tk):
             self.rate_lbl.config(text="\u2014 Hz")
             self.rf_lbl.config(text="no telemetry")
             self._set_lq(None)
+            self._last_mode = None
             self._set_mode(None)
             src = "simulated pad" if self.simulate else (
                 state.device_name if state.connected else "no gamepad")
@@ -1657,6 +1676,59 @@ class App(tk.Tk):
     # name left over from before the telemetry stopped would read as current.
     MODE_STALE = 3.0
     MODE_MAX_CHARS = 10
+
+    # The model has to have been seen marking a disarm before the absence
+    # of that mark means anything.
+    STAR_HINT_AFTER = 10.0
+
+    def _model_armed(self):
+        """True only when the model itself says it is armed.
+
+        Never a guess: with no telemetry, or a sender that does not mark
+        disarm, this is False and the CH5 interlock is what protects a
+        settings write.
+        """
+        return self._armed_report is True
+
+    def _set_arm(self, data):
+        """Paint the arm chip with what the MODEL reports.
+
+        CRSF carries no armed frame. What it carries is a convention: the
+        sender appends a star to the flight mode while disarmed, and
+        ArduPilot only does that with RC_OPTIONS bit 12 set. So a mode with
+        no star is as consistent with a sender that never marks disarm as
+        it is with a model in the air, and the two are only told apart by
+        having seen a star at some point - which happens on the ground,
+        before arming, in the normal course of things.
+
+        Until then this says nothing rather than guessing. An arm light
+        that reads DISARMED because it cannot tell would be worse than no
+        arm light at all.
+        """
+        fresh = data and time.monotonic() - data.get("_t", 0) < self.MODE_STALE
+        if fresh and not self._mode_since:
+            self._mode_since = time.monotonic()
+        self._armed_report = self._arm_watch.feed(data if fresh else None)
+
+        if self._armed_report is None:
+            self.arm_lbl.config(text="ARM: —", bg=self.pal["idle"])
+            self._hint_disarm_star(bool(fresh))
+        elif self._armed_report:
+            self.arm_lbl.config(text="ARMED", bg=self.pal["danger"])
+        else:
+            self.arm_lbl.config(text="DISARMED", bg=self.pal["ok"])
+
+    def _hint_disarm_star(self, fresh):
+        """Say once why the arm chip is blank, when it is worth saying."""
+        if self._said_star_hint or not fresh or self._arm_watch.marker_seen:
+            return
+        if time.monotonic() - self._mode_since < self.STAR_HINT_AFTER:
+            return
+        self._said_star_hint = True
+        self.log("info", "The model reports its flight mode but never marks a "
+                         "disarm, so ARMED cannot be read from it. On "
+                         "ArduPilot set RC_OPTIONS bit 12 (add 4096) to have "
+                         "it append * to the mode name while disarmed.")
 
     def _set_mode(self, data):
         """Paint the flight-mode chip with what the model reports."""

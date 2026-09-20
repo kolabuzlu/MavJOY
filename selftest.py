@@ -291,6 +291,34 @@ def _check_arm_is_ch5():
     assert armed == [5], f"CH5 high must read as armed, got {armed}"
 
 
+def _check_arm_from_model():
+    """Armed comes from the model, and says nothing when it cannot tell.
+
+    CRSF carries no armed frame. The convention is a star appended to the
+    flight mode while disarmed, and ArduPilot only does that with
+    RC_OPTIONS bit 12 set - so a mode with no star, before any star has
+    ever been seen, means nothing at all and must not read as DISARMED.
+    """
+    print("")
+    print("-- armed, as the model reports it --")
+    w = crsf.ArmWatch()
+
+    assert w.feed(None) is None, "no telemetry cannot mean disarmed"
+    first = w.feed(crsf.parse_flight_mode(b"FBWA" + bytes([0])))
+    print(f"   FBWA  (no star ever seen): {first}")
+    assert first is None, "a mode with no star proves nothing on its own"
+
+    disarmed = w.feed(crsf.parse_flight_mode(b"FBWA*" + bytes([0])))
+    print(f"   FBWA* (star):              {disarmed}")
+    assert disarmed is False, "a star means disarmed"
+
+    armed = w.feed(crsf.parse_flight_mode(b"AUTO" + bytes([0])))
+    print(f"   AUTO  (star seen before):  {armed}")
+    assert armed is True, "no star, once the marker is known, means armed"
+
+    assert w.feed(None) is None, "losing telemetry must not read as armed"
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -454,6 +482,7 @@ def _run(wire):
     _check_rf_hold(wire, lk, mixer)
     _check_oneway()
     _check_arm_is_ch5()
+    _check_arm_from_model()
 
     lk.stop()
     lk.join(timeout=2)

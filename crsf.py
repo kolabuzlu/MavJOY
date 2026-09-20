@@ -266,7 +266,49 @@ def parse_flight_mode(payload: bytes):
         # Some senders leave the terminator off the last frame.
         mode = payload.decode("ascii", "replace")
     mode = mode.strip()
-    return {"mode": mode} if mode else None
+    if not mode:
+        return None
+
+    # CRSF has no armed frame at all. What it has is a convention: the
+    # sender appends a star to the mode name while DISARMED. ArduPilot only
+    # does it when RC_OPTIONS bit 12 is set, so a name with no star means
+    # either armed or the option is off, and the two cannot be told apart
+    # from one frame. Report the star as the fact it is and leave the
+    # reading of it to a caller that can watch for one over time.
+    disarm_star = mode.endswith("*")
+    if disarm_star:
+        mode = mode[:-1].strip()
+        if not mode:
+            return None
+    return {"mode": mode, "disarm_star": disarm_star}
+
+
+class ArmWatch:
+    """Reads armed state out of the flight-mode convention, or admits it cannot.
+
+    CRSF has no armed frame. Senders append a star to the mode name while
+    DISARMED, and ArduPilot only does that with RC_OPTIONS bit 12 set, so a
+    single frame without a star proves nothing: it is as consistent with a
+    sender that never marks a disarm as with a model in the air.
+
+    Once a star HAS been seen the marker is known to be in use, and from
+    then on its absence means armed. A model sits disarmed on the ground
+    before it flies, so that is learned in the normal course of things - and
+    until it is, this says None rather than guessing. An arm indicator that
+    reads DISARMED because it cannot tell is worse than none at all.
+    """
+
+    def __init__(self):
+        self.marker_seen = False
+
+    def feed(self, mode_data):
+        """Take a decoded flight-mode dict (or None) -> True, False or None."""
+        if not mode_data:
+            return None
+        if mode_data.get("disarm_star"):
+            self.marker_seen = True
+            return False
+        return True if self.marker_seen else None
 
 
 def parse_vario(payload: bytes):
