@@ -142,7 +142,10 @@ class App(tk.Tk):
         menubar.add_cascade(label="Help", menu=helpmenu)
         self.config(menu=menubar)
 
-    LOGO_FILE = "mavjoyback.png"
+    # The monitor on its own, keyed onto transparency - see make_icon.py.
+    # The full lockup carries the wordmark and a black background, neither
+    # of which survives being shrunk to the height of two rows of controls.
+    LOGO_FILE = "mavjoy_icon.png"
     LOGO_MARGIN = 3         # breathing room above and below
     LOGO_MIN = 24           # below this it is not worth drawing
 
@@ -208,10 +211,10 @@ class App(tk.Tk):
         self._logo_img = self._load_logo(available)
         if self._logo_img is None:
             return
-        # The PNG has a solid black background and no alpha, so the label is
-        # told to match rather than leaving the panel colour framing a
-        # black square.
-        tk.Label(panel, image=self._logo_img, bg="#000000",
+        # Transparent, so it is given the panel's own colour to sit on and
+        # composites into it cleanly - in either theme, rather than the
+        # black tile the full lockup left behind.
+        tk.Label(panel, image=self._logo_img, bg=self.pal["panel"],
                  borderwidth=0, highlightthickness=0).pack(
             side="right", expand=True)
 
