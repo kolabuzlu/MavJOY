@@ -53,6 +53,7 @@ class App(tk.Tk):
         self._cmd_index = None              # command currently running
         self._telem_last = ""               # last telemetry text drawn
         self._pending_write = None          # (field index, value) we asked for
+        self._devices_seq = -1              # last device list we drew
         self._device = None                 # DEVICE_INFO from the module
 
         self.gamepad = (gp.SimGamepadThread() if simulate else gp.GamepadThread())
@@ -548,6 +549,18 @@ class App(tk.Tk):
         self.hat_lbl = ttk.Label(tab, text="hats: —")
         self.hat_lbl.pack(anchor="w", padx=12, pady=4)
 
+    def _watch_devices(self):
+        """Redraw the device pickers when something is plugged or unplugged.
+
+        The input thread bumps a counter when the list changes, so this is a
+        cheap integer compare on the GUI tick rather than a rescan.
+        """
+        seq = getattr(self.gamepad, "devices_seq", 0)
+        if seq == self._devices_seq:
+            return
+        self._devices_seq = seq
+        self._fill_gamepads(announce=True)
+
     def _shown_slot(self):
         """The device slot the Inputs tab is currently displaying."""
         try:
@@ -674,35 +687,65 @@ class App(tk.Tk):
                 else (self.pad_combo_b, self.pad_var_b))
 
     def _wanted_devices(self):
+        """Saved slots, as identity dicts.
+
+        Older configs stored a bare index. Indexes move when devices come and
+        go, so they are only a starting point - once a slot is filled the
+        name and GUID are saved instead.
+        """
         wanted = list(self.cfg.get("gamepads") or [0, None])
         while len(wanted) < 2:
             wanted.append(None)
-        return wanted
+        out = []
+        for entry in wanted[:2]:
+            if entry is None:
+                out.append(None)
+            elif isinstance(entry, dict):
+                out.append(dict(entry))
+            else:
+                out.append({"index": int(entry)})
+        return out
 
-    def _fill_gamepads(self, tries=1):
-        devices = self.gamepad.devices
+    def _fill_gamepads(self, tries=1, announce=False):
+        devices = self.gamepad.device_list
         if not devices and tries > 1:
             self.after(400, lambda: self._fill_gamepads(tries - 1))
             return
-        listing = [self.NO_DEVICE] + [f"{i}: {n}" for i, n in enumerate(devices)]
+        self._devices_seq = getattr(self.gamepad, "devices_seq", 0)
+        listing = [self.NO_DEVICE] + [f"{d['index']}: {d['name']}" for d in devices]
         wanted = self._wanted_devices()
 
+        taken = []
         for slot in (0, 1):
             combo, var = self._slot_widgets(slot)
             combo["values"] = listing
-            index = wanted[slot]
-            if index is not None and index >= len(devices):
-                self.log("warn", f"Device {index} is not connected, so slot "
-                                 f"{slot} was left empty.")
-                index = None
+            index = self.gamepad.resolve(wanted[slot], taken)
+            if index is not None:
+                taken.append(index)
+            self.gamepad.select_identity(wanted[slot], slot)
+            found = next((d for d in devices if d["index"] == index), None)
+
+            if wanted[slot] and index is None:
+                name = wanted[slot].get("name", "the saved device")
+                if announce:
+                    self.log("warn", f"Slot {slot}: {name} is no longer "
+                                     f"connected.")
+                var.set(self.NO_DEVICE)
+                # Keep the saved identity so it is picked up again on replug.
+                continue
+
             if index is None:
                 var.set(self.NO_DEVICE)
-                self.gamepad.select(None, slot)
-            else:
-                var.set(listing[index + 1])
-                self.gamepad.select(index, slot)
-                self.log("info", f"Slot {slot}: {devices[index]}")
-            wanted[slot] = index
+                continue
+
+            var.set(listing[index + 1])
+            entry = {"name": (found or {}).get("name", ""),
+                     "guid": (found or {}).get("guid", ""),
+                     "index": index}
+            wanted[slot] = entry
+            if announce:
+                self.log("info", f"Slot {slot}: {devices[index]['name']}")
+
         self.cfg["gamepads"] = wanted
         self._refresh_input_slots()
 
@@ -718,8 +761,11 @@ class App(tk.Tk):
             wanted[slot] = None
             self.gamepad.select(None, slot)
         else:
-            wanted[slot] = int(label.split(":", 1)[0])
-            self.gamepad.select(wanted[slot], slot)
+            index = int(label.split(":", 1)[0])
+            self.gamepad.select(index, slot)
+            entry = self.gamepad.identity(slot) or {}
+            entry["index"] = index
+            wanted[slot] = entry
         self.cfg["gamepads"] = wanted
         self._refresh_input_slots()
 
@@ -1286,6 +1332,7 @@ class App(tk.Tk):
         self.after(REFRESH_MS, self._tick)
 
     def _update(self):
+        self._watch_devices()
         self._apply_auto_rate()
         # a link thread that died (port vanished, write error) must not leave
         # the UI stuck in "started"
@@ -1376,7 +1423,7 @@ class App(tk.Tk):
         if not hasattr(self, "input_slot_combo"):
             return
         wanted = self._wanted_devices()
-        slots = [str(i) for i, index in enumerate(wanted) if index is not None] or ["0"]
+        slots = [str(i) for i, entry in enumerate(wanted) if entry is not None] or ["0"]
         self.input_slot_combo["values"] = slots
         if self.input_slot.get() not in slots:
             self.input_slot.set(slots[0])

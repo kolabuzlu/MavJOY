@@ -203,6 +203,7 @@ class CrsfLink(threading.Thread):
         self.telemetry = {}
         self.running = False
         self.transmitting = False   # True while we are actually sending frames
+        self._had_input = False     # have we ever had live input on this link
         self._parser = crsf.Parser()
         self._ser = None
 
@@ -381,6 +382,16 @@ class CrsfLink(threading.Thread):
             return
 
         if not self.transmitting:
+            if self._had_input:
+                # Coming back after a dropout. Latches are software state
+                # that outlived the outage, so an arm toggle that was on
+                # would go straight back out armed the moment the device
+                # reappears. Clear them, exactly as starting a link does.
+                self.mixer.reset()
+                self.on_event("warn", "Input returned. Latches and throttle "
+                                      "were reset, so arming needs a fresh "
+                                      "action.")
+            self._had_input = True
             self.transmitting = True
             self.on_event("info", "Transmitting channel data")
 

@@ -76,6 +76,8 @@ class GamepadThread(threading.Thread):
         self._states = {}            # slot -> InputState
         self._devices = []
         self._wanted = {}            # slot -> device index the GUI asked for
+        self._wanted_id = {}         # slot -> {"name", "guid"} it was given
+        self.devices_seq = 0         # bumped whenever the device list changes
         self._rescan = threading.Event()
         self._stop_event = threading.Event()
         self._joys = {}              # slot -> pygame joystick
@@ -100,7 +102,13 @@ class GamepadThread(threading.Thread):
     @property
     def devices(self):
         with self._lock:
-            return list(self._devices)
+            return [d["name"] for d in self._devices]
+
+    @property
+    def device_list(self):
+        """Every device seen, with the identity a slot is matched on."""
+        with self._lock:
+            return [dict(d) for d in self._devices]
 
     @property
     def open_index(self):
@@ -111,9 +119,40 @@ class GamepadThread(threading.Thread):
         return dict(self._open_index)
 
     def select(self, index, slot: int = 0):
-        """Put device `index` in `slot`; None empties the slot."""
+        """Put device `index` in `slot`; None empties the slot.
+
+        The device's identity is remembered alongside the index, because
+        indexes are reassigned as devices come and go.
+        """
+        ident = None
+        if index is not None:
+            for d in self.device_list:
+                if d["index"] == index:
+                    ident = {"name": d["name"], "guid": d["guid"]}
+                    break
         self._wanted[slot] = index
+        self._wanted_id[slot] = ident
         self._rescan.set()
+
+    def select_identity(self, ident, slot: int = 0):
+        """Restore a slot from a saved identity, resolving the index now."""
+        self._wanted_id[slot] = ident or None
+        self._wanted[slot] = (ident or {}).get("index")
+        self._rescan.set()
+
+    def identity(self, slot: int):
+        """What slot is holding, in a form that survives a replug."""
+        ident = self._wanted_id.get(slot)
+        return dict(ident) if ident else None
+
+    def resolve(self, ident, taken=()):
+        """The index this identity maps to right now, or None if it is gone.
+
+        Public because the GUI needs the answer before the thread has acted
+        on a rescan, and it should not be reading this object's internals.
+        """
+        return self._match(self.device_list, ident,
+                           (ident or {}).get("index"), set(taken))
 
     def rescan(self):
         self._rescan.set()
@@ -133,13 +172,17 @@ class GamepadThread(threading.Thread):
         self._scan()
         next_t = time.perf_counter()
         while not self._stop_event.is_set():
-            pygame.event.pump()
+            # get(), not pump(): pump processes the queue and throws it away,
+            # and SDL is already telling us when a device arrives or leaves.
+            for event in pygame.event.get():
+                if event.type in (pygame.JOYDEVICEADDED,
+                                  pygame.JOYDEVICEREMOVED):
+                    self._rescan.set()
 
             if self._rescan.is_set():
                 self._rescan.clear()
                 self._scan()
-                for slot, index in list(self._wanted.items()):
-                    self._open(slot, index)
+                self._resolve_slots()
 
             self._poll()
 
@@ -157,17 +200,58 @@ class GamepadThread(threading.Thread):
     def _scan(self):
         pygame.joystick.quit()
         pygame.joystick.init()
-        names = []
+        devices = []
         for i in range(pygame.joystick.get_count()):
+            name, guid = f"device {i}", ""
             try:
-                names.append(pygame.joystick.Joystick(i).get_name())
+                joy = pygame.joystick.Joystick(i)
+                name = joy.get_name()
+                guid = joy.get_guid()
             except Exception:
-                names.append(f"device {i}")
+                pass
+            devices.append({"index": i, "name": name, "guid": guid})
         with self._lock:
-            self._devices = names
+            if devices != self._devices:
+                self.devices_seq += 1
+            self._devices = devices
         # a rescan invalidates every handle we held
         self._joys = {}
         self._open_index = {}
+
+    def _resolve_slots(self):
+        """Re-point every slot at the device it was told to hold.
+
+        Indexes are reassigned when devices come and go, so a slot is matched
+        on identity - GUID first, then name - and only falls back to a raw
+        index when it was never given one (an older config). A device already
+        claimed by a lower slot is never handed to a second one.
+        """
+        devices = self.device_list
+        taken = set()
+        for slot in sorted(set(self._wanted) | set(self._wanted_id)):
+            index = self._match(devices, self._wanted_id.get(slot),
+                                self._wanted.get(slot), taken)
+            self._wanted[slot] = index
+            if index is not None:
+                taken.add(index)
+            self._open(slot, index)
+
+    @staticmethod
+    def _match(devices, ident, fallback_index, taken):
+        if ident:
+            for key in ("guid", "name"):
+                want = ident.get(key)
+                if not want:
+                    continue
+                for d in devices:
+                    if d[key] == want and d["index"] not in taken:
+                        return d["index"]
+            return None          # it was named, and it is not here
+        if fallback_index is not None:
+            for d in devices:
+                if d["index"] == fallback_index and d["index"] not in taken:
+                    return d["index"]
+        return None
 
     def _open(self, slot, index):
         self._close(slot)
@@ -237,6 +321,7 @@ class SimGamepadThread(threading.Thread):
         self.error = ""
         self._t0 = time.monotonic()
         self._slots = {0}
+        self.devices_seq = 0
 
     @property
     def state(self) -> InputState:
@@ -257,6 +342,21 @@ class SimGamepadThread(threading.Thread):
     @property
     def devices(self):
         return ["Simulated F710 (X mode)"]
+
+    @property
+    def device_list(self):
+        return [{"index": 0, "name": "Simulated F710 (X mode)", "guid": "sim"}]
+
+    def select_identity(self, ident, slot: int = 0):
+        self.select(None if ident is None else 0, slot)
+
+    def resolve(self, ident, taken=()):
+        return None if ident is None or 0 in set(taken) else 0
+
+    def identity(self, slot: int):
+        if slot not in self._slots:
+            return None
+        return {"name": "Simulated F710 (X mode)", "guid": "sim", "index": 0}
 
     @property
     def open_index(self):

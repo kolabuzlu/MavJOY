@@ -145,6 +145,28 @@ Starting a link checks all of them too.
 Latches are keyed by device as well as input number, so button 3 on the pad
 and button 3 on the throttle are different switches.
 
+### Plugging and unplugging
+
+Devices are picked up as they arrive. SDL reports arrivals and departures as
+events, the input thread watches for them, and the device pickers redraw on
+their own — there is no need to press the refresh button, which is still
+there for when you want to force a rescan.
+
+A slot remembers *which device* it was given, by GUID and name, not the
+position it happened to occupy. Indexes are reassigned as devices come and
+go, so a slot that stored only an index could silently end up pointing at a
+different piece of hardware after a replug: the pad's axes read from the
+throttle and the throttle engine reads the pad. Matched on identity, a
+device returns to the slot it left, and a slot whose device is absent stays
+empty rather than grabbing whatever is nearest.
+
+**A link that has dropped out resumes on its own when the device comes
+back, and the latches are reset when it does.** Toggles and cycle positions
+are software state that outlives the outage, so an arm toggle that was on
+would otherwise go straight back out armed the moment the plug went in.
+Arming after a dropout takes a fresh action, exactly as starting a link
+does.
+
 ### Arming
 
 A channel can be flagged **arm** in the Channels tab. While it reads high
