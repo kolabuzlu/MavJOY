@@ -236,18 +236,23 @@ class SimGamepadThread(threading.Thread):
         self._state = InputState()
         self.error = ""
         self._t0 = time.monotonic()
+        self._slots = {0}
 
     @property
     def state(self) -> InputState:
         with self._lock:
             return self._state
 
-    def state_for(self, _slot: int) -> InputState:
-        return self.state          # every slot sees the same synthetic pad
+    def state_for(self, slot: int) -> InputState:
+        # Only slots that were actually selected report. Claiming every slot
+        # is live while `states` held one entry made a channel on device 1
+        # look connected in the Inputs tab and then fail to start.
+        return self.state if slot in self._slots else InputState()
 
     @property
     def states(self):
-        return {0: self.state}
+        st = self.state
+        return {slot: st for slot in sorted(self._slots)}
 
     @property
     def devices(self):
@@ -259,10 +264,13 @@ class SimGamepadThread(threading.Thread):
 
     @property
     def open_indexes(self):
-        return {0: 0}
+        return {slot: 0 for slot in sorted(self._slots)}
 
     def select(self, index, slot: int = 0):
-        pass
+        if index is None:
+            self._slots.discard(slot)
+        else:
+            self._slots.add(slot)
 
     def rescan(self):
         pass
@@ -449,8 +457,7 @@ class Mixer:
         self.deadzone = float(config.get("deadzone", 0.04))
         # Per-axis overrides. Sticks wear unevenly, so a single value for the
         # whole pad means deadening the good axes to tame the worst one.
-        self.axis_deadzone = {int(k): float(v)
-                              for k, v in (config.get("axis_deadzone") or {}).items()}
+        self.axis_deadzone = self._load_axis_deadzone(config)
         # Latches are keyed by (device slot, input number): button 3 on the
         # pad and button 3 on the throttle are different switches.
         self._toggles = {}
@@ -461,9 +468,28 @@ class Mixer:
         self._last_t = None
         self.last_values = [crsf.CHANNEL_MID] * crsf.NUM_CHANNELS
 
-    def deadzone_for(self, axis: int) -> float:
-        """The deadzone for one axis, falling back to the pad-wide value."""
-        return self.axis_deadzone.get(axis, self.deadzone)
+    @staticmethod
+    def _load_axis_deadzone(config):
+        """Read the saved overrides, keyed "device:axis".
+
+        Entries written before deadzone was per-device are a bare axis
+        number, and belong to device 0.
+        """
+        out = {}
+        for key, value in (config.get("axis_deadzone") or {}).items():
+            text = str(key)
+            dev, _, axis = text.rpartition(":")
+            try:
+                out[(int(dev or 0), int(axis))] = float(value)
+            except ValueError:
+                continue
+        return out
+
+    def deadzone_for(self, dev: int, axis: int) -> float:
+        """The deadzone for one axis of one device, falling back to the
+        pad-wide value. Keyed by device for the same reason the latches are:
+        a worn stick on one pad must not deaden another device's axis."""
+        return self.axis_deadzone.get((dev, axis), self.deadzone)
 
     def reset(self):
         """Called before a link is started: everything back to a safe state."""
@@ -547,12 +573,12 @@ class Mixer:
             return crsf.unit_to_crsf(1.0 - v if ch.inv else v)
 
         if src == "axis":
-            raw = st.axes[ch.idx] if ch.idx < len(st.axes) else 0.0
-            raw = _apply_deadzone(raw, self.deadzone_for(ch.idx))
+            raw = st.axes[ch.idx] if 0 <= ch.idx < len(st.axes) else 0.0
+            raw = _apply_deadzone(raw, self.deadzone_for(ch.dev, ch.idx))
             return crsf.norm_to_crsf(-raw if ch.inv else raw)
 
         if src == "button":
-            on = ch.idx < len(st.buttons) and st.buttons[ch.idx]
+            on = 0 <= ch.idx < len(st.buttons) and st.buttons[ch.idx]
             if ch.inv:
                 on = not on
             return crsf.CHANNEL_MAX if on else crsf.CHANNEL_MIN
@@ -580,6 +606,10 @@ class Mixer:
         if src == "switch":
             buttons = ch.switch_buttons()
             steps = max(2, len(buttons))
+            # Keyed on the buttons themselves: with an explicit list, idx is
+            # ignored by switch_buttons, so two such switches would otherwise
+            # share a latch and yank each other between detents.
+            key = (ch.dev, tuple(buttons))
             pos = None
             for i, btn in enumerate(buttons):
                 if 0 <= btn < len(st.buttons) and st.buttons[btn]:
@@ -588,17 +618,22 @@ class Mixer:
             if pos is None:
                 # Nothing lit. Real switches pass through a gap between
                 # detents, so hold the last position rather than snapping the
-                # channel to an end stop mid-move.
-                pos = self._switches.get((ch.dev, ch.idx), 0)
+                # channel to an end stop mid-move. With nothing held yet -
+                # including when no button is ever in range - fall back to
+                # whichever end reads low once inv is applied, never to full
+                # deflection.
+                pos = self._switches.get(key)
+                if pos is None:
+                    pos = steps - 1 if ch.inv else 0
             else:
-                self._switches[(ch.dev, ch.idx)] = pos
+                self._switches[key] = pos
             if ch.inv:
                 pos = steps - 1 - pos
             return crsf.CHANNEL_MIN + round(pos * (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)
                                             / (steps - 1))
 
         if src in ("hat_x", "hat_y"):
-            if ch.idx < len(st.hats):
+            if 0 <= ch.idx < len(st.hats):
                 hx, hy = st.hats[ch.idx]
                 raw = float(hx if src == "hat_x" else hy)
             else:

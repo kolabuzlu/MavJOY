@@ -472,6 +472,8 @@ class App(tk.Tk):
                                              width=10, state="readonly",
                                              values=("0",))
         self.input_slot_combo.pack(side="right")
+        self.input_slot_combo.bind("<<ComboboxSelected>>",
+                                   self.refresh_deadzone_boxes)
 
         self.axis_frame = ttk.LabelFrame(tab, text="Axes")
         self.axis_frame.pack(fill="x", padx=10, pady=4)
@@ -495,7 +497,7 @@ class App(tk.Tk):
             val = ttk.Label(grid, text="—", width=8, anchor="e")
             cells.append(val)
 
-            dz = tk.StringVar(value=f"{self.mixer.deadzone_for(i):.2f}")
+            dz = tk.StringVar(value=f"{self.mixer.deadzone_for(0, i):.2f}")
             spin = ttk.Spinbox(grid, from_=0.0, to=0.5, increment=0.01, width=6,
                                format="%.2f", textvariable=dz,
                                command=lambda n=i: self.on_deadzone_changed(n))
@@ -546,33 +548,50 @@ class App(tk.Tk):
         self.hat_lbl = ttk.Label(tab, text="hats: —")
         self.hat_lbl.pack(anchor="w", padx=12, pady=4)
 
+    def _shown_slot(self):
+        """The device slot the Inputs tab is currently displaying."""
+        try:
+            return int(self.input_slot.get())
+        except (tk.TclError, ValueError, AttributeError):
+            return 0
+
+    def _set_axis_deadzone(self, slot, axis, value):
+        """One writer for both stores, so they cannot drift apart."""
+        value = round(max(0.0, min(0.5, value)), 3)
+        self.mixer.axis_deadzone[(slot, axis)] = value
+        self.cfg.setdefault("axis_deadzone", {})[f"{slot}:{axis}"] = value
+        return value
+
     def on_deadzone_changed(self, n):
-        """Per-axis deadzone. Sticks wear unevenly, so one value for the whole
-        pad means over-deadening the good axes to tame the worst one."""
+        """Per-axis, per-device deadzone. Sticks wear unevenly, so one value
+        for the whole pad means over-deadening the good axes to tame the worst
+        one - and two devices must not share a number either."""
+        slot = self._shown_slot()
         w = self.axis_widgets[n]
         try:
             value = float(w["dz"].get())
         except (tk.TclError, ValueError):
-            w["dz"].set(f"{self.mixer.deadzone_for(n):.2f}")
+            w["dz"].set(f"{self.mixer.deadzone_for(slot, n):.2f}")
             return
-        value = max(0.0, min(0.5, value))
-        self.mixer.axis_deadzone[n] = value
-        self.cfg.setdefault("axis_deadzone", {})[str(n)] = round(value, 3)
-        w["dz"].set(f"{value:.2f}")
+        w["dz"].set(f"{self._set_axis_deadzone(slot, n, value):.2f}")
+
+    def refresh_deadzone_boxes(self, _evt=None):
+        """Repoint the boxes when the shown device changes."""
+        slot = self._shown_slot()
+        for n, w in enumerate(self.axis_widgets):
+            w["dz"].set(f"{self.mixer.deadzone_for(slot, n):.2f}")
 
     def apply_deadzone_to_all(self):
         try:
             value = max(0.0, min(0.5, float(self.dz_all.get())))
         except (tk.TclError, ValueError):
             return
-        self.cfg["deadzone"] = round(value, 3)
-        self.mixer.deadzone = value
+        slot = self._shown_slot()
         for n, w in enumerate(self.axis_widgets):
-            self.mixer.axis_deadzone[n] = value
-            self.cfg.setdefault("axis_deadzone", {})[str(n)] = round(value, 3)
-            w["dz"].set(f"{value:.2f}")
+            w["dz"].set(f"{self._set_axis_deadzone(slot, n, value):.2f}")
         self.dz_all.set(f"{value:.2f}")
-        self.log("info", f"Deadzone set to {value:.2f} on every axis.")
+        self.log("info", f"Deadzone set to {value:.2f} on every axis of "
+                         f"device {slot}.")
 
     # ----------------------------------------------------------- telemetry
     def _build_telemetry_tab(self, nb):
@@ -736,7 +755,10 @@ class App(tk.Tk):
         try:
             ch.src = w["src"].get()
             raw = str(w["idx"].get()).strip().lower()
-            ch.idx = 0 if raw in ("", self.NO_INDEX) else int(raw)
+            if raw not in ("", self.NO_INDEX):
+                # The box reads "none" for sources that take no index;
+                # that is the widget being blanked, not a request for 0.
+                ch.idx = max(0, int(raw))
             ch.inv = bool(w["inv"].get())
             ch.dev = int(w["dev"].get())
             ch.arm = bool(w["arm"].get())
@@ -790,6 +812,18 @@ class App(tk.Tk):
                     "No input", f"No live data from {where}. Select it in the "
                                 f"toolbar and move a control to confirm it is "
                                 f"reporting.")
+                return
+
+        # An unmapped channel sends centre, which is ~1500us - mid-throttle
+        # on a throttle channel. With nothing mapped the throttle check below
+        # has nothing to test, so say so plainly instead of passing silently.
+        if all(c.src == "none" for c in self.mixer.channels):
+            if not messagebox.askokcancel(
+                    "Nothing is mapped",
+                    "No channel has a source, so every channel will transmit "
+                    "centre - about 1500us, which is mid-throttle on a "
+                    "throttle channel. Map your channels first, or start "
+                    "anyway to test the link itself?"):
                 return
 
         # safety: reset every latch, then verify the throttle really is at idle
@@ -1038,13 +1072,28 @@ class App(tk.Tk):
                 f"CH{armed[0]} is armed. Disarm before changing {what} - "
                 f"module settings can interrupt the RF link.")
             return False
-        return bool(self.link and self.link.running)
+        if not (self.link and self.link.running):
+            return False
+        if self.link.transmitting:
+            # Some settings re-key the RF link. Ask while channel data is
+            # actually going out, whatever the field is, rather than
+            # keeping a list of which fields are dangerous.
+            return messagebox.askokcancel(
+                "Change a module setting?",
+                f"Change {what} while the link is live? Some settings "
+                f"re-key the RF link, so the receiver drops out and goes "
+                f"to failsafe for a moment. Props off.")
+        return True
 
     def _write_field(self, index, value, description):
         self._pending_write = (index, value)
+        field = self._fields.get(index)
+        # Numeric fields are not all one byte wide; sending one byte for a
+        # uint16 leaves the module reading our CRC as half the value.
+        width = crsf.param_value_width(field.type) if field else 1
         self.module_info_lbl.config(text=f"writing {description} ...")
         self.log("info", f"Module: setting {description}")
-        self.link.submit("write", index=index, value=value,
+        self.link.submit("write", index=index, value=value, width=width,
                          on_done=self._module_cb("written"))
 
     def _after_write(self, field):
@@ -1151,6 +1200,11 @@ class App(tk.Tk):
             return
 
         if field.status == crsf.CMD_CONFIRMATION_NEEDED:
+            # The link keeps running while the dialog is up, so the model can
+            # be armed between Run and OK. Re-check rather than trusting the
+            # check run_command did.
+            if self._cancel_if_armed(field, "confirm"):
+                return
             ok = messagebox.askokcancel(
                 field.name, field.info or f"Confirm {field.name}?")
             reply = crsf.CMD_CONFIRM if ok else crsf.CMD_CANCEL
@@ -1163,8 +1217,27 @@ class App(tk.Tk):
         self.module_info_lbl.config(text=f"{field.name}: {outcome}")
         self.log("info", f"Module: {field.name} finished ({outcome})")
 
+    def _cancel_if_armed(self, field, stage):
+        """Abandon a command in progress if the model became armed."""
+        armed = self.mixer.armed_channels()
+        if not armed:
+            return False
+        self._cmd_index = None
+        if self.link and self.link.running:
+            self.link.submit("write", index=field.index,
+                             value=crsf.CMD_CANCEL, settle=0.1)
+        message = (f"CH{armed[0]} went armed while {field.name} was waiting "
+                   f"to {stage}, so it was cancelled.")
+        self.module_info_lbl.config(text=f"{field.name}: cancelled, armed")
+        self.log("warn", message)
+        messagebox.showwarning("Cancelled", message)
+        return True
+
     def _poll_command(self, index):
         if self.link is None or not self.link.running or self._cmd_index != index:
+            return
+        field = self._fields.get(index)
+        if field is not None and self._cancel_if_armed(field, "finish"):
             return
         self.link.submit("write", index=index, value=crsf.CMD_POLL,
                          settle=0.1, on_done=self._module_cb("cmd"))
@@ -1219,17 +1292,24 @@ class App(tk.Tk):
         if self.link is not None and not self.link.is_alive():
             self.stop_link(reason="link thread ended")
 
+        states = self.gamepad.states
         state = self.gamepad.state
         link_active = self.link is not None
         running = bool(self.link and self.link.running)
+        transmitting = bool(running and self.link.transmitting)
 
-        # ---- channel values. While a link exists the link thread owns the
-        # mixer; the GUI only ever reads what it last produced.
-        if link_active:
+        # ---- channel values. While the link is transmitting that thread
+        # owns the mixer and the GUI only reads what it produced. Otherwise
+        # nothing else is touching it, so recompute here: that keeps
+        # last_values - and therefore the arm interlock - current, instead
+        # of frozen at whatever it held the instant the input died.
+        if transmitting:
             values = list(self.mixer.last_values)
+        elif any(st.is_fresh() for st in states.values()):
+            values = self.mixer.compute(states)
         else:
-            values = self.mixer.compute(state) if state.connected else \
-                self.mixer.failsafe_values()
+            values = self.mixer.failsafe_values()
+            self.mixer.last_values = list(values)
 
         for i, w in enumerate(self.ch_widgets):
             v = values[i]
@@ -1309,7 +1389,8 @@ class App(tk.Tk):
                 v = state.axes[i]
                 w["bar"]["value"] = (v + 1.0) * 1000
                 w["val"].config(text=f"{v:+.3f}")
-                out = gp._apply_deadzone(v, self.mixer.deadzone_for(i))
+                out = gp._apply_deadzone(
+                    v, self.mixer.deadzone_for(self._shown_slot(), i))
                 w["out"].config(text=f"{out:+.3f}")
             else:
                 for cell in w["cells"]:
@@ -1430,7 +1511,7 @@ class App(tk.Tk):
         self.thr_dz.set(t["deadzone"])
         self.baud_var.set(str(self.cfg["baud"]))
         for n, w in enumerate(self.axis_widgets):
-            w["dz"].set(f"{self.mixer.deadzone_for(n):.2f}")
+            w["dz"].set(f"{self.mixer.deadzone_for(0, n):.2f}")
         self.dz_all.set(f"{self.cfg.get('deadzone', 0.05):.2f}")
         self.rate_var.set(self.cfg["rate_hz"])
         self.rate_auto.set(bool(self.cfg.get("rate_auto", True)))

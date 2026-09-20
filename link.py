@@ -100,8 +100,10 @@ class _ParamJob:
     # the write still reported the previous rate; 2.5 s reported the new one.
     WRITE_SETTLE = 1.2
 
-    def __init__(self, kind, index=None, value=None, on_done=None, settle=None):
+    def __init__(self, kind, index=None, value=None, on_done=None, settle=None,
+                 width=1):
         self.kind = kind
+        self.width = width
         self.settle = self.WRITE_SETTLE if settle is None else settle
         self.stage = kind
         self.index = index
@@ -120,7 +122,7 @@ class _ParamJob:
             if not self._wrote:
                 self._wrote = True
                 self._settle_until = time.monotonic() + self.settle
-                return crsf.param_write_frame(self.index, self.value)
+                return crsf.param_write_frame(self.index, self.value, self.width)
             if time.monotonic() < self._settle_until:
                 return None     # let the module apply and save first
             # The write is sent once; read the field back to confirm what
@@ -191,6 +193,7 @@ class CrsfLink(threading.Thread):
         # it gives when it will not accept a setting.
         self.elrs_status = None
         self._status_next = 0.0
+        self._clear_warning = threading.Event()
 
     def on_event(self, level, message):
         """Report an event. A broken callback must never kill the link."""
@@ -207,7 +210,8 @@ class CrsfLink(threading.Thread):
         with self._lock:
             return dict(self.telemetry), self.stats
 
-    def submit(self, kind, index=None, value=None, on_done=None, settle=None):
+    def submit(self, kind, index=None, value=None, on_done=None, settle=None,
+               width=1):
         """Queue a settings operation. `on_done(result, error)` is called on
         the link thread, so a GUI must marshal it back to its own thread.
 
@@ -218,7 +222,7 @@ class CrsfLink(threading.Thread):
         Settings need the default; command fields answer at once, so they
         pass something short to keep the UI responsive.
         """
-        self._jobs.put(_ParamJob(kind, index, value, on_done, settle))
+        self._jobs.put(_ParamJob(kind, index, value, on_done, settle, width))
 
     def busy(self):
         return self._job is not None or not self._jobs.empty()
@@ -339,9 +343,12 @@ class CrsfLink(threading.Thread):
             self.transmitting = False
             with self._lock:
                 self.stats.frames_skipped += 1
+            # Nothing is written on this path. The whole failsafe design
+            # rests on the module hearing silence: ExpressLRS runs a 1 second
+            # watchdog on its handset UART, and any well-formed frame - a
+            # settings request included - is a frame it heard. Telemetry is
+            # read-only, so it stays.
             self._read_telemetry()
-            self._service_jobs()
-            self._service_status()
             return
 
         if not self.transmitting:
@@ -430,6 +437,9 @@ class CrsfLink(threading.Thread):
             return
         self._status_next = now + self.STATUS_INTERVAL
         try:
+            if self._clear_warning.is_set():
+                self._clear_warning.clear()
+                self._ser.write(crsf.elrs_clear_warning_frame())
             self._ser.write(crsf.elrs_status_request_frame())
         except Exception:
             pass
@@ -443,11 +453,13 @@ class CrsfLink(threading.Thread):
         return status
 
     def clear_warning(self):
-        """Acknowledge a warning so the module stops repeating it."""
-        try:
-            self._ser.write(crsf.elrs_clear_warning_frame())
-        except Exception:
-            pass
+        """Ask the link thread to acknowledge a latched warning.
+
+        Called from the GUI thread, so it only raises a flag: this thread is
+        the only one that touches the port, and two threads writing one
+        pyserial handle can splice a settings frame into an RC frame.
+        """
+        self._clear_warning.set()
 
     def _service_jobs(self):
         now = time.monotonic()

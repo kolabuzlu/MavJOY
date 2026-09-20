@@ -332,8 +332,27 @@ def param_read_frame(index: int, chunk: int = 0) -> bytes:
     return pack_extended(FRAMETYPE_PARAMETER_READ, bytes([index & 0xFF, chunk & 0xFF]))
 
 
-def param_write_frame(index: int, value: int) -> bytes:
-    return pack_extended(FRAMETYPE_PARAMETER_WRITE, bytes([index & 0xFF, value & 0xFF]))
+def param_value_width(ftype: int) -> int:
+    """How many bytes a write to a field of this type carries.
+
+    Selects, commands and the status pseudo-fields are one byte; the numeric
+    types are as wide as they were parsed.
+    """
+    return _NUMERIC.get(ftype, (1, False))[0]
+
+
+def param_write_frame(index: int, value: int, width: int = 1) -> bytes:
+    """Write a value to a settings field.
+
+    The value is sent big-endian in `width` bytes, matching the width the
+    entry was parsed with. Sending one byte for a uint16 field leaves the
+    module reading our CRC as the second half of the value, so it either
+    CRC-fails or applies a number nobody asked for.
+    """
+    width = max(1, min(4, int(width)))
+    masked = int(value) & ((1 << (8 * width)) - 1)   # two's complement for negatives
+    return pack_extended(FRAMETYPE_PARAMETER_WRITE,
+                         bytes([index & 0xFF]) + masked.to_bytes(width, "big"))
 
 
 def _cstr(buf: bytes, i: int):
@@ -501,6 +520,12 @@ def parse_param_entry(index: int, body: bytes):
             width, signed = _NUMERIC[ftype]
 
             def take(pos):
+                # Slicing past the end yields b"" and int.from_bytes turns
+                # that into 0, so a truncated entry would parse as a real
+                # value of zero with a 0..0 range. Every other branch indexes
+                # and raises; make this one behave the same.
+                if pos + width > len(body):
+                    raise IndexError("numeric parameter entry is truncated")
                 return int.from_bytes(body[pos:pos + width], "big", signed=signed)
 
             field.value = take(i)

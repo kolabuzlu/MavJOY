@@ -186,11 +186,24 @@ def _run(wire):
     pad.stop()
     time.sleep(0.6)
     before = lk.stats.frames_sent
-    time.sleep(0.5)
+    while wire.read():          # drain anything still in flight
+        pass
+    time.sleep(1.0)
     after = lk.stats.frames_sent
-    print(f"frames sent during the 0.5 s after input died: {after - before}")
+    # Count bytes on the wire, not frames_sent. The failsafe contract is that
+    # the module hears *silence*, and a settings or status frame is invisible
+    # to frames_sent while still being a frame ExpressLRS heard.
+    leaked = b""
+    t_end = time.time() + 2.5
+    while time.time() < t_end:
+        leaked += wire.read()
+        time.sleep(0.01)
+    print(f"frames sent during the 1.0 s after input died: {after - before}")
+    print(f"bytes written to the port over the next 2.5 s: {len(leaked)}")
     assert after == before, "link kept transmitting with dead input!"
     assert not lk.transmitting
+    assert not leaked, (f"link wrote {len(leaked)} bytes during failsafe: "
+                        f"{leaked[:32].hex(' ')} - the module must hear silence")
 
     # ---- telemetry path
     ls = bytes([45, 50, 100, 8, 0, 6, 5, 40, 98, 3])

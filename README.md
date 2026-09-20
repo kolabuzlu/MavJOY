@@ -184,9 +184,11 @@ affects. Each row shows the raw reading and what the mapper will actually
 send, so you can wind the number up until a resting stick reads zero and no
 further.
 
-Deadzone is set per axis rather than for the pad as a whole because sticks
-wear unevenly — one worn axis would otherwise force you to deaden all of
-them. **Apply to all** sets every axis at once when that is what you want.
+Deadzone is set per axis **and per device**, because sticks wear unevenly
+and a worn axis on the pad must not deaden the same-numbered axis on a
+separate throttle. The boxes follow the `showing` selector, so they always
+edit the device whose live values are beside them. **Apply to all** covers
+every axis of the shown device.
 
 Whatever is left outside the deadzone is rescaled, so full deflection still
 reaches the end of the channel travel. The throttle engine keeps its own
@@ -347,6 +349,16 @@ Other safety behaviour:
 
 - The gamepad is polled on its own thread, so a frozen GUI cannot affect
   control, and input older than 150 ms counts as dead.
+- While input is stale the link writes **nothing at all** — not telemetry
+  requests, not settings traffic. Any well-formed frame is a frame the
+  module heard, so anything on the wire undermines the watchdog that is
+  meant to drop the link. `selftest.py` asserts on bytes written rather
+  than on frames counted, because a settings frame is invisible to a frame
+  counter while still being audible to the module.
+- Module settings are refused while a channel flagged **arm** reads high,
+  and a write attempted while the link is live asks first. A command that
+  pauses for confirmation re-checks on the way through, so it cannot
+  complete against a model armed while the dialog was open.
 - A link will not start unless throttle reads 0 % and every latch is reset.
 - **Esc** stops the link instantly from anywhere in the app.
 - The link thread runs at raised priority, and on Windows it requests 1 ms
