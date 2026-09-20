@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from collections import deque
 
-from PIL import Image, ImageFilter
+from PIL import Image
 
 SOURCE = "mavjoyback.png"
 ICON_PNG = "mavjoy_icon.png"
@@ -45,23 +45,16 @@ LOGO_SIZES = [48, 64, 80, 96, 128]
 LOGO_PATTERN = "mavjoy_lockup_%d.png"
 
 
-def scaled(art, size):
-    """One size, resampled well and then given its edges back.
+def resized(art, size):
+    """One size, reduced and nothing else.
 
-    Reducing by this much is a low-pass filter however good the filter is,
-    and the result reads as soft next to artwork drawn at the size it is
-    shown. An unsharp pass afterwards gives back the edge contrast the
-    reduction took out. Small sizes lose proportionally more, so they get
-    proportionally more of it back.
-
-    The radius is kept tight. A wider one sharpens harder but rings: white
-    against the red of the joystick overshoots into cyan, and a halo shows
-    round the base - which at icon sizes reads as grubby rather than crisp.
+    LANCZOS and no sharpening. Reducing this far does soften the result,
+    and an unsharp pass afterwards would look crisper - but it invents edge
+    contrast the artwork does not have and leaves a dark rim around the
+    bezel, so what comes out is no longer the logo. A plain reduction is
+    what "resize it" means.
     """
-    out = art.resize((size, size), Image.Resampling.LANCZOS)
-    percent = 140 if size <= 32 else (115 if size <= 64 else 100)
-    return out.filter(ImageFilter.UnsharpMask(radius=0.6, percent=percent,
-                                              threshold=0))
+    return art.resize((size, size), Image.Resampling.LANCZOS)
 
 
 def content_bands(im, threshold=30):
@@ -149,9 +142,7 @@ def main():
     canvas.paste(art, ((side - art.width) // 2, (side - art.height) // 2))
     canvas.save(ICON_PNG)
 
-    # Built one at a time rather than left to the ICO writer, which resamples
-    # well but cannot sharpen afterwards.
-    frames = [scaled(canvas, n) for n in ICO_SIZES]
+    frames = [resized(canvas, n) for n in ICO_SIZES]
     frames[-1].save(ICON_ICO, format="ICO",
                     sizes=[(n, n) for n in ICO_SIZES],
                     append_images=frames[:-1])
@@ -159,13 +150,9 @@ def main():
           f"{len(ICO_SIZES)} sizes")
 
     # The window's copies come from the source as drawn, black background
-    # and all - not from the cropped artwork above, and NOT sharpened. The
-    # icon is sharpened because it is reduced to 32 px and needs the help;
-    # the logo in the window is the original file resized and nothing else,
-    # because anything more shows as an edit of artwork nobody asked to
-    # have edited.
+    # and all, rather than from the cropped artwork above.
     for n in LOGO_SIZES:
-        im.resize((n, n), Image.Resampling.LANCZOS)           .convert("RGB").save(LOGO_PATTERN % n)
+        resized(im, n).convert("RGB").save(LOGO_PATTERN % n)
     print("wrote " + ", ".join(LOGO_PATTERN % n for n in LOGO_SIZES))
     return 0
 
