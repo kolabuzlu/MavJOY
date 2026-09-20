@@ -476,12 +476,13 @@ class SimGamepadThread(threading.Thread):
 #  Channel mapping
 # ===========================================================================
 
-SOURCES = ("none", "axis", "throttle", "button", "toggle", "cycle", "switch",
-           "hat_x", "hat_y", "fixed")
+SOURCES = ("none", "axis", "throttle", "button", "toggle", "oneway",
+           "cycle", "switch", "hat_x", "hat_y", "fixed")
 
 # Sources that read a numbered input. The rest ignore the index: none
 # sends centre, throttle comes from its own engine, fixed uses value.
-INDEXED_SOURCES = ("axis", "button", "toggle", "cycle", "switch", "hat_x", "hat_y")
+INDEXED_SOURCES = ("axis", "button", "toggle", "oneway", "cycle", "switch",
+                   "hat_x", "hat_y")
 
 SOURCE_HELP = {
     "none": "sends centre (992)",
@@ -489,6 +490,8 @@ SOURCE_HELP = {
     "throttle": "the throttle engine configured above",
     "button": "momentary: low when released, high while held",
     "toggle": "latching: each press flips low/high (use for ARM)",
+    "oneway": "one-way toggle: a press sets it high and it stays high, however "
+              "often it is pressed. Only a reset channel brings it back",
     "cycle": "each press steps to the next position, then wraps",
     "switch": "multi-position switch wired as one button per position: index "
               "is the first button, steps is how many",
@@ -583,7 +586,6 @@ class ChannelMap:
     idx: int = 0
     inv: bool = False
     dev: int = 0                   # which gamepad slot this reads
-    arm: bool = False              # treat high on this channel as armed
     reset_ch: int = 0              # 1-16: a latch drops low when that moves
     reset_move: int = 100          # how far it must move to count, in us
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
@@ -605,7 +607,7 @@ class ChannelMap:
     def from_dict(cls, d):
         return cls(src=d.get("src", "none"), idx=int(d.get("idx", 0)),
                    inv=bool(d.get("inv", False)),
-                   dev=int(d.get("dev", 0)), arm=bool(d.get("arm", False)),
+                   dev=int(d.get("dev", 0)),
                    reset_ch=int(d.get("reset_ch", 0)),
                    reset_move=int(d.get("reset_move", 100)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
@@ -614,7 +616,7 @@ class ChannelMap:
 
     def to_dict(self):
         out = {"src": self.src, "idx": self.idx, "inv": self.inv,
-               "dev": self.dev, "arm": self.arm,
+               "dev": self.dev,
                "reset_ch": self.reset_ch, "reset_move": self.reset_move,
                "value": self.value, "steps": self.steps}
         if self.buttons:
@@ -640,6 +642,7 @@ class Mixer:
         # pad and button 3 on the throttle are different switches.
         self._toggles = {}
         self._cycles = {}
+        self._oneway = {}
         self._switches = {}
         self._reset_ref = {}         # channel -> where its watched channel was
         self._held = {}              # channel -> value frozen at a resume
@@ -678,6 +681,7 @@ class Mixer:
         """
         self._toggles.pop((ch.dev, ch.idx), None)
         self._cycles.pop((ch.dev, ch.idx), None)
+        self._oneway.pop((ch.dev, ch.idx), None)
         try:
             self._switches.pop((ch.dev, tuple(ch.switch_buttons())), None)
         except Exception:
@@ -717,6 +721,7 @@ class Mixer:
         """
         self._toggles.clear()
         self._cycles.clear()
+        self._oneway.clear()
         self._switches.clear()
         self._reset_ref.clear()
         self._held.clear()
@@ -731,7 +736,7 @@ class Mixer:
         for i, ch in enumerate(self.channels):
             if ch.src == "throttle":
                 vals[i] = crsf.CHANNEL_MIN
-            elif ch.src in ("button", "toggle", "cycle", "switch"):
+            elif ch.src in ("button", "toggle", "oneway", "cycle", "switch"):
                 vals[i] = crsf.CHANNEL_MIN
             elif ch.src == "fixed":
                 vals[i] = ch.value
@@ -793,8 +798,8 @@ class Mixer:
     # nudge does.
     RESUME_RELEASE = 32
 
-    def hold_on_resume(self):
-        """Freeze every channel at the value last actually transmitted.
+    def hold_on_resume(self, values=None):
+        """Freeze every channel at the value the model last actually had.
 
         Called the moment frames start flowing again after a dropout, and
         before the fresh input is read. Without it, anything moved while the
@@ -805,8 +810,16 @@ class Mixer:
         Each channel stays frozen until its own input moves again. That move
         is the pilot deliberately taking the channel back, so it is the only
         thing that should hand control over.
+
+        `values` is what the model last actually received. It defaults to the
+        last values computed, which is right when the input itself went away:
+        those were frozen for the whole outage anyway. When the RF link was
+        what broke, the sticks never stopped moving and the computed values
+        followed them, so the caller passes the snapshot it took while the
+        link was still up.
         """
-        self._held = {i: v for i, v in enumerate(self.last_values)}
+        src = self.last_values if values is None else values
+        self._held = {i: v for i, v in enumerate(src)}
         self._hold_ref = {}
 
     def holding(self):
@@ -841,7 +854,7 @@ class Mixer:
         is what resetting means, as opposed to an interlock that holds it.
         """
         for i, ch in enumerate(self.channels):
-            if ch.src not in ("toggle", "cycle") or not ch.reset_ch:
+            if ch.src not in ("toggle", "oneway", "cycle") or not ch.reset_ch:
                 continue
             watched = ch.reset_ch - 1
             if not (0 <= watched < len(vals)) or watched == i:
@@ -861,6 +874,14 @@ class Mixer:
                 if self._toggles.get(key, False) == ch.inv:
                     continue                         # already low
                 self._toggles[key] = ch.inv          # latch xor inv -> low
+            elif ch.src == "oneway":
+                # Back to un-pressed, which is what "bring it back" means
+                # here. That is the low end for a plain channel, and the
+                # resting end for an inverted one - either way it is the
+                # state the channel had before the press that latched it.
+                if not self._oneway.get(key, False):
+                    continue                         # never latched
+                self._oneway[key] = False
             else:
                 if self._cycles.get(key, 0) == 0:
                     continue
@@ -925,6 +946,20 @@ class Mixer:
                 on = not on
             return crsf.CHANNEL_MAX if on else crsf.CHANNEL_MIN
 
+        if src == "oneway":
+            # Set-only. A press latches it and further presses do nothing;
+            # the sole way back is a reset channel, handled in _apply_resets.
+            # Useful for anything that must not be undone by a fumbled
+            # second press - the press is the commitment, and taking it back
+            # is made deliberately awkward.
+            key = (ch.dev, ch.idx)
+            if ch.idx in pressed:
+                self._oneway[key] = True
+            on = self._oneway.get(key, False)
+            if ch.inv:
+                on = not on
+            return crsf.CHANNEL_MAX if on else crsf.CHANNEL_MIN
+
         if src == "cycle":
             steps = max(2, min(6, ch.steps))
             key = (ch.dev, ch.idx)
@@ -979,27 +1014,24 @@ class Mixer:
     def toggle_states(self):
         return dict(self._toggles)
 
-    def armed_channels(self):
-        """Channels that count as armed, for the display and the interlocks.
+    # CH5 is the arm channel. Always, and nothing else ever is.
+    ARM_CHANNEL = 5
 
-        A toggle or a cycle off its first position counts on its own, since
-        that is what an arm switch normally is. Any other source counts once
-        the channel is flagged as an arm channel, so arming from a
-        three-position switch or a held button is caught by the same
-        interlocks. The flagged test reads the value actually computed, so
-        inv and the source's own rules are already accounted for.
+    def armed_channels(self):
+        """The arm channel, if it is currently reading armed.
+
+        CH5, and only CH5. This used to work the other way round - anything
+        that looked like an arm switch counted, so a latched flight mode on
+        CH6 or a one-way on CH7 announced itself as armed and the interlock
+        refused to write settings. Guessing which channel means "armed" from
+        the source type is not something that can be got right, because the
+        same sources are used for everything else too.
+
+        The value actually computed is what is read, so inv and the source's
+        own rules are already accounted for. An unmapped CH5 sits at centre
+        and so never reads armed.
         """
-        out = []
-        for i, ch in enumerate(self.channels):
-            key = (ch.dev, ch.idx)
-            armed = False
-            if ch.src == "toggle":
-                armed = self._toggles.get(key, False) != ch.inv
-            elif ch.src == "cycle":
-                armed = self._cycles.get(key, 0) != 0
-            if not armed and ch.arm:
-                armed = (i < len(self.last_values)
-                         and self.last_values[i] > crsf.CHANNEL_MID)
-            if armed:
-                out.append(i + 1)
-        return out
+        i = self.ARM_CHANNEL - 1
+        if i < len(self.last_values) and self.last_values[i] > crsf.CHANNEL_MID:
+            return [self.ARM_CHANNEL]
+        return []

@@ -277,13 +277,12 @@ class App(tk.Tk):
         ("source",   "w",       0,  6, 0),   # 2 source
         ("index",    "w",       0,  6, 0),   # 3 index
         ("inv",      "center",  0,  6, 0),   # 4 invert
-        ("arm",      "center",  0,  8, 0),   # 5 counts as armed
-        ("steps",    "w",       0, 14, 0),   # 6 steps
-        ("reset by",  "w",      0,  6, 0),   # 7 latch reset: watched channel
-        ("moves",    "w",       0, 14, 0),   # 8 latch reset: how far, in us
-        ("value",    "w",       0,  8, 1),   # 9 bar
-        ("",         "e",       0, 10, 0),   # 10 numeric value
-        ("",         "w",       0,  0, 0),   # 11 hint
+        ("steps",    "w",       0, 14, 0),   # 5 steps
+        ("reset by",  "w",      0,  6, 0),   # 6 latch reset: watched channel
+        ("moves",    "w",       0, 14, 0),   # 7 latch reset: how far, in us
+        ("value",    "w",       0,  8, 1),   # 8 bar
+        ("",         "e",       0, 10, 0),   # 9 numeric value
+        ("",         "w",       0,  0, 0),   # 10 hint
     )
 
     def _build_channels_tab(self, nb):
@@ -342,23 +341,18 @@ class App(tk.Tk):
                                   command=lambda n=i: self.on_channel_changed(n)),
                   4, sticky="")
 
-            arm = tk.BooleanVar(value=chcfg.arm)
-            place(ttk.Checkbutton(grid, variable=arm,
-                                  command=lambda n=i: self.on_channel_changed(n)),
-                  5, sticky="")
-
             steps = tk.StringVar(value=str(chcfg.steps))
             steps_spin = ttk.Spinbox(grid, from_=2, to=6, width=4,
                                      textvariable=steps,
                                      command=lambda n=i: self.on_channel_changed(n))
-            place(steps_spin, 6)
+            place(steps_spin, 5)
 
             reset_ch = tk.StringVar(value=self._reset_label(chcfg.reset_ch))
             reset_combo = ttk.Combobox(
                 grid, textvariable=reset_ch, width=6, state="readonly",
                 values=[self.NO_INDEX] + [f"CH{n}" for n in
                                           range(1, crsf.NUM_CHANNELS + 1)])
-            place(reset_combo, 7)
+            place(reset_combo, 6)
             reset_combo.bind("<<ComboboxSelected>>",
                              lambda _e, n=i: self.on_channel_changed(n))
 
@@ -366,23 +360,23 @@ class App(tk.Tk):
             reset_spin = ttk.Spinbox(grid, from_=10, to=500, increment=10,
                                      width=5, textvariable=reset_move,
                                      command=lambda n=i: self.on_channel_changed(n))
-            place(reset_spin, 8)
+            place(reset_spin, 7)
             reset_spin.bind("<KeyRelease>",
                             lambda _e, n=i: self.on_channel_changed(n))
 
             bar = ttk.Progressbar(grid, maximum=1000)
-            place(bar, 9, sticky="ew")
+            place(bar, 8, sticky="ew")
 
             val = ttk.Label(grid, text="—", anchor="e", width=14)
-            place(val, 10, sticky="e")
+            place(val, 9, sticky="e")
 
             place(ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
-                            foreground=self.pal["muted"]), 11)
+                            foreground=self.pal["muted"]), 10)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
                                     "spin": spin, "steps_spin": steps_spin,
-                                    "dev": dev, "arm": arm,
+                                    "dev": dev,
                                     "reset_ch": reset_ch, "reset_move": reset_move,
                                     "reset_combo": reset_combo,
                                     "reset_spin": reset_spin})
@@ -393,10 +387,11 @@ class App(tk.Tk):
                   foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 2))
         ttk.Label(tab, foreground=self.pal["muted"], wraplength=900, justify="left",
                   text="dev picks which gamepad a channel reads, for setups with a "
-                       "separate USB throttle. arm marks a channel as an arming "
-                       "channel: while it is high the app will not change module "
-                       "settings, and the ARM light is red. A toggle counts as an "
-                       "arm channel whether or not it is ticked.").pack(
+                       "separate USB throttle. CH5 is the arm channel: while it "
+                       "reads high the app will not change module settings and the "
+                       "ARM light is red. That is fixed - no other channel arms, "
+                       "whatever it is mapped to, so a latch on a flight mode "
+                       "channel is just a flight mode.").pack(
             anchor="w", padx=10, pady=(0, 2))
         self.src_help = ttk.Label(tab, text="", foreground=self.pal["faint"])
         self.src_help.pack(anchor="w", padx=10, pady=(0, 8))
@@ -843,7 +838,7 @@ class App(tk.Tk):
 
         # Only a latch has anything to reset. A switch reads its lever every
         # frame, so there is no stored state to clear.
-        if ch.src in ("toggle", "cycle"):
+        if ch.src in ("toggle", "oneway", "cycle"):
             w["reset_combo"].config(state="readonly")
             w["reset_ch"].set(self._reset_label(ch.reset_ch))
             w["reset_spin"].config(
@@ -880,7 +875,6 @@ class App(tk.Tk):
                     else max(0, int(raw_idx)),
                 inv=bool(w["inv"].get()),
                 dev=int(w["dev"].get()),
-                arm=bool(w["arm"].get()),
                 value=old.value,
                 steps=old.steps if raw_steps in ("", self.NO_INDEX)
                       else max(2, min(6, int(raw_steps))),
@@ -1740,7 +1734,6 @@ class App(tk.Tk):
             w["src"].set(ch.src)
             w["inv"].set(ch.inv)
             w["dev"].set(str(ch.dev))
-            w["arm"].set(ch.arm)
             self._sync_row_widgets(i)
         t = self.cfg["throttle"]
         self.thr_mode.set(t["mode"])

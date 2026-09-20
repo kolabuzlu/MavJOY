@@ -100,6 +100,197 @@ def _open_wire():
     return _SocketWire(), True
 
 
+class _FakePad:
+    """A gamepad this test positions by hand, so a stick can be held still
+    or moved at an exact moment. The sim pad sweeps on a timer, which is no
+    use when the whole question is what a channel did across one event."""
+
+    def __init__(self):
+        self._axes = [0.0] * 8
+        self.error = ""
+
+    def set_axis(self, i, v):
+        self._axes[i] = v
+
+    @property
+    def states(self):
+        return {0: gp.InputState(axes=tuple(self._axes),
+                                 buttons=(False,) * 12, hats=((0, 0),),
+                                 timestamp=time.monotonic(),
+                                 device_name="fake", connected=True)}
+
+    def stop(self):
+        pass
+
+
+def _link_stats(lq):
+    """A LINK_STATISTICS frame reporting this link quality both ways."""
+    payload = bytes([0, 0, lq, 0, 0, 0, 0, 0, lq, 0])
+    body = bytes([crsf.FRAMETYPE_LINK_STATISTICS]) + payload
+    return (bytes([crsf.CRSF_SYNC_BYTE, len(body) + 1]) + body
+            + bytes([crsf.crc8(body)]))
+
+
+def _pump(wire, lk, seconds, lq):
+    """Hold the reported link quality at `lq` for a while, and return the
+    channels from the last RC frame the link actually wrote."""
+    last = None
+    t_end = time.time() + seconds
+    while time.time() < t_end:
+        wire.inject(_link_stats(lq))
+        time.sleep(0.05)
+        data = wire.read()
+        if data:
+            for _addr, ftype, payload in crsf.Parser().feed(data):
+                if ftype == crsf.FRAMETYPE_RC_CHANNELS_PACKED:
+                    last = crsf.unpack_rc_channels(payload)
+    return last
+
+
+def _check_rf_hold(wire, lk, mixer):
+    """Losing the RF link must not hand control over when it comes back.
+
+    The model cannot hear anything during an RF dropout, so whatever the
+    sticks did meanwhile never reached it. If those positions went out the
+    moment the link returned, a flight mode moved during the outage would
+    take effect at once and the model would leave the failsafe it was
+    holding. It has to stay there until the pilot moves that channel.
+
+    This drives the real link thread over the real wire. Nothing here
+    reimplements the decision under test - a reimplementation is free to be
+    right while the app is wrong, which is exactly how this was missed.
+    """
+    print("\n-- RF dropout --")
+    pad = _FakePad()
+    lk.gamepad = pad
+
+    pad.set_axis(0, 0.0)                      # stick centred, link healthy
+    before = _pump(wire, lk, 1.5, 100)
+    assert before, "no RC frames while the link is up"
+    # Channels left frozen by the input-dropout test above are correct and
+    # expected - nothing has moved them. Only the one under test matters.
+    assert 4 not in mixer.holding(), "CH4 was still frozen before the test"
+    centred = before[3]
+    print(f"   link up, stick centred:      CH4 = {centred}")
+
+    _pump(wire, lk, 1.2, 0)                   # link down, and confirmed down
+    pad.set_axis(0, 1.0)                      # pilot moves it while deaf
+    during = _pump(wire, lk, 0.8, 0)
+    print(f"   link down, stick moved:      CH4 = {during[3]} "
+          f"(never reaches the model)")
+    assert during[3] != centred, "the test did not actually move the stick"
+
+    after = _pump(wire, lk, 1.5, 100)         # back on the air
+    print(f"   link back, stick still over: CH4 = {after[3]}")
+    assert after[3] == centred, (
+        f"the model would have been handed the new position: "
+        f"CH4 came back as {after[3]}, not the {centred} it had when the "
+        f"link dropped")
+    assert 4 in mixer.holding(), "CH4 should be frozen after an RF recovery"
+
+    pad.set_axis(0, -1.0)                     # pilot takes the channel back
+    released = _pump(wire, lk, 1.0, 100)
+    print(f"   pilot moves it:              CH4 = {released[3]} (released)")
+    assert released[3] != centred, "the channel never released"
+    assert 4 not in mixer.holding(), "CH4 should have released once moved"
+
+
+def _check_oneway():
+    """A one-way toggle latches high and refuses to come back on its own.
+
+    The mixer is the whole of this behaviour, so it is driven directly. The
+    point of the source is that a second press cannot undo the first, which
+    means the test has to press more than once and insist nothing happened.
+    """
+    print("")
+    print("-- one-way toggle --")
+    cfg = configmod.default_config()
+    cfg["channels"][0] = {"src": "axis", "idx": 0, "inv": False}
+    cfg["channels"][1] = {"src": "oneway", "idx": 3, "inv": False,
+                          "reset_ch": 1, "reset_move": 100}
+    mixer = gp.Mixer(cfg)
+    mixer.reset()
+
+    def frame(axis=0.0, button=False):
+        buttons = [False] * 8
+        buttons[3] = button
+        st = gp.InputState(axes=(axis, 0.0, 0.0, 0.0),
+                           buttons=tuple(buttons), hats=((0, 0),),
+                           timestamp=time.monotonic(),
+                           device_name="fake", connected=True)
+        return mixer.compute({0: st})[1]
+
+    assert frame() == crsf.CHANNEL_MIN, "should start low"
+    print(f"   at rest:            CH2 = {frame()}")
+
+    frame(button=True)                      # press
+    latched = frame(button=False)           # release
+    print(f"   pressed:            CH2 = {latched}")
+    assert latched == crsf.CHANNEL_MAX, "a press must latch it high"
+
+    for _ in range(3):                      # and again, and again
+        frame(button=True)
+        frame(button=False)
+    print(f"   pressed 3x more:    CH2 = {frame()}")
+    assert frame() == crsf.CHANNEL_MAX, "a second press must NOT bring it back"
+
+    frame(axis=0.0)                         # baseline for the reset watcher
+    frame(axis=1.0)                         # move the watched channel
+    after = frame(axis=1.0)
+    print(f"   reset channel moved: CH2 = {after}")
+    assert after == crsf.CHANNEL_MIN, "the reset channel must bring it back"
+
+    # The watched channel has to stay put: a reset fires on its movement,
+    # and moving it back in the same frame as the press would clear the
+    # latch the press just set.
+    frame(axis=1.0, button=True)
+    again = frame(axis=1.0, button=False)
+    print(f"   pressed again:      CH2 = {again}")
+    assert again == crsf.CHANNEL_MAX, "it must latch again after a reset"
+
+
+def _check_arm_is_ch5():
+    """Only CH5 arms. A latch on any other channel is just a latch.
+
+    The interlock used to infer "armed" from the source type, so a flight
+    mode latched high on CH6 - or a one-way on CH7 - announced itself as an
+    arm channel and then blocked every settings write.
+    """
+    print("")
+    print("-- arm is CH5 --")
+    cfg = configmod.default_config()
+    cfg["channels"][4] = {"src": "toggle", "idx": 1, "inv": False}   # CH5
+    cfg["channels"][5] = {"src": "toggle", "idx": 2, "inv": False}   # CH6
+    cfg["channels"][6] = {"src": "oneway", "idx": 3, "inv": False}   # CH7
+    mixer = gp.Mixer(cfg)
+    mixer.reset()
+
+    def frame(*down):
+        buttons = [False] * 8
+        for b in down:
+            buttons[b] = True
+        st = gp.InputState(axes=(0.0,) * 4, buttons=tuple(buttons),
+                           hats=((0, 0),), timestamp=time.monotonic(),
+                           device_name="fake", connected=True)
+        mixer.compute({0: st})
+        return mixer.armed_channels()
+
+    assert frame() == [], "nothing pressed must not read as armed"
+
+    frame(2)
+    frame()                      # CH6 toggle now latched high
+    frame(3)
+    frame()                      # CH7 one-way now latched high
+    other = frame()
+    print(f"   CH6 and CH7 latched high: armed = {other}")
+    assert other == [], f"only CH5 may count as armed, got {other}"
+
+    frame(1)
+    armed = frame()              # CH5 toggle now latched high
+    print(f"   CH5 latched high:         armed = {armed}")
+    assert armed == [5], f"CH5 high must read as armed, got {armed}"
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -233,6 +424,10 @@ def _run(wire):
     assert lk.transmitting, "the link did not resume when input returned"
     assert len(resumed) > 1000, "frames are not flowing again"
     pad2.stop()
+
+    _check_rf_hold(wire, lk, mixer)
+    _check_oneway()
+    _check_arm_is_ch5()
 
     lk.stop()
     lk.join(timeout=2)

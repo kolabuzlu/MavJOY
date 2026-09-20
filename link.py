@@ -230,6 +230,18 @@ class CrsfLink(threading.Thread):
         # ExpressLRS status: whether a receiver is connected, and the reason
         # it gives when it will not accept a setting.
         self.elrs_status = None
+
+        # The chain from hand to model breaks in two places, not one. The
+        # input going quiet is the obvious half and is handled above; the RF
+        # link dropping is the other, and from here it looks like nothing at
+        # all - the sticks keep reporting and we keep sending, while none of
+        # it reaches the model. Both end the same way and must be treated
+        # the same way, so the module's own view of the RF link is tracked
+        # here. See _track_rf.
+        self._rf_up = None       # None until the module first tells us
+        self._rf_since = 0.0     # when the current reading started
+        self._rf_lost = False    # a confirmed dropout we have not held for
+        self._rf_hold = None     # values from the last confirmed-good tick
         self._status_next = 0.0
         self._clear_warning = threading.Event()
 
@@ -363,6 +375,73 @@ class CrsfLink(threading.Thread):
             else:
                 time.sleep(0)  # yield, then spin
 
+    # A short hole in the link is normal at range; a dropout is not. The
+    # module has to read down for this long before it counts, so ordinary
+    # flutter between packets does not freeze every channel.
+    RF_DEBOUNCE = 0.5
+
+    def _rf_report(self):
+        """Does the module say it is talking to the model? None if unknown.
+
+        Link statistics carry it fastest - they arrive at the packet rate, so
+        a dropout shows within a few frames. The module's own status frame is
+        the fallback, since that only comes round every STATUS_INTERVAL.
+        Unknown is its own answer: with no word from the module we do not get
+        to guess, and nothing is held.
+        """
+        now = time.monotonic()
+        with self._lock:
+            stats = dict(self.telemetry.get("link") or {})
+            status = dict(self.elrs_status or {})
+        if stats and now - stats.get("_t", 0.0) < 1.0:
+            return stats.get("dn_lq", 0) > 0 or stats.get("up_lq", 0) > 0
+        if status and now - status.get("_t", 0.0) < 3 * self.STATUS_INTERVAL:
+            return bool(status.get("connected"))
+        return None
+
+    def _track_rf(self, values):
+        """Follow the RF link, and say when it has just come back.
+
+        Returns True once, on the tick a confirmed dropout ends. `values` is
+        what we are sending now; while the link is confirmed up that is also
+        what the model is receiving, so it is kept as the snapshot to freeze
+        at. Snapshotting stops the moment the module first reads down - ahead
+        of the debounce - so what survives is from before the dropout, not
+        from during it. That is the whole point: the sticks go on moving
+        through an RF outage and none of it arrives.
+        """
+        now = time.monotonic()
+        up = self._rf_report()
+        if up is None:
+            return False
+
+        if up != self._rf_up:
+            self._rf_up = up
+            self._rf_since = now
+        steady = now - self._rf_since
+
+        if up:
+            if self._rf_lost and steady >= self.RF_DEBOUNCE:
+                self._rf_lost = False
+                return True
+            if not self._rf_lost:
+                self._rf_hold = list(values)
+            return False
+
+        # A link that was never up has not dropped. Starting the link with
+        # nothing bound - a bench session, or the model not powered yet -
+        # reads as disconnected from the first frame, and calling that a
+        # dropout would cry wolf and then freeze every channel the moment
+        # the model first came up. _rf_hold is only ever set while the link
+        # is confirmed good, so its absence is exactly "never seen".
+        if (self._rf_hold is not None and not self._rf_lost
+                and steady >= self.RF_DEBOUNCE):
+            self._rf_lost = True
+            self.on_event("warn", "Lost the link to the model. It is on its "
+                                  "own failsafe now, and nothing you move "
+                                  "will reach it.")
+        return False
+
     def _tick(self):
         # Every device the map reads has to be live, not just the first
         # one. A separate USB throttle fails independently of the pad,
@@ -379,8 +458,21 @@ class CrsfLink(threading.Thread):
         # must never do that by itself.
         resuming = (stale_slot is None and not self.transmitting
                     and self._sent_before)
-        if resuming:
-            self.mixer.hold_on_resume()
+
+        # The same freeze, for the other way the chain breaks. An RF dropout
+        # is invisible from here - the sticks keep reporting and we keep
+        # sending - so the model coming back on the air has to be caught from
+        # the module's own report, and frozen at what it had when it went
+        # away rather than at anything the sticks did meanwhile.
+        rf_resuming = self._track_rf(self.mixer.last_values)
+
+        if resuming or rf_resuming:
+            self.mixer.hold_on_resume(self._rf_hold if rf_resuming else None)
+        if rf_resuming:
+            self.on_event("warn", "The model is back on the air. Every "
+                                  "channel holds the value it had when the "
+                                  "link dropped until you move it, so the "
+                                  "model stays in its failsafe.")
 
         # Computed on every tick, reporting or not. The mixer then always
         # holds a current picture - which is what the arm interlock reads -
@@ -392,7 +484,8 @@ class CrsfLink(threading.Thread):
         if stale_slot is not None:
             if self.transmitting:
                 where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
-                reason = f"{where} disconnected" if not st.connected else                          f"{where} data stale ({st.age() * 1000:.0f} ms)"
+                reason = (f"{where} disconnected" if not st.connected
+                          else f"{where} data stale ({st.age() * 1000:.0f} ms)")
                 self.on_event("warn", f"Stopped transmitting: {reason}. "
                                       f"Receiver will go to failsafe.")
             self.transmitting = False

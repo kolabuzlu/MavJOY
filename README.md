@@ -89,7 +89,8 @@ throttle on the wrong control, which is not a mistake worth risking on a
 1 W transmitter.
 
 The index only applies to sources that read a numbered input — `axis`,
-`button`, `toggle`, `cycle`, `hat_x`, `hat_y`. For `none`, `throttle` and
+`button`, `toggle`, `oneway`, `cycle`, `hat_x`, `hat_y`. For `none`,
+`throttle` and
 `fixed` it reads `none` and the box is locked, rather than showing a `0`
 that does nothing.
 
@@ -124,7 +125,8 @@ numbers, so you can confirm what your pad actually reports and build the
 mapping to match.
 
 Channel sources: `axis`, `button` (momentary), `toggle` (latching — use for
-arm), `cycle` (steps through 2–6 positions on each press), `switch` (a real
+arm), `oneway` (one-way toggle: a press sets it high and it stays high — see
+below), `cycle` (steps through 2–6 positions on each press), `switch` (a real
 multi-position switch — see below), `hat_x`/`hat_y` (d-pad), `fixed`,
 `throttle`, `none`.
 
@@ -199,11 +201,17 @@ back in without touching refresh.
 
 ### Arming
 
-A channel can be flagged **arm** in the Channels tab. While it reads high
-the app refuses to change module settings and the ARM light is red. A
-`toggle` counts as an arm channel whether or not it is ticked, which is the
-old behaviour; the flag is what lets a three-position switch or a held
-button arm safely too.
+**CH5 is the arm channel.** Always, and nothing else ever is. While CH5
+reads high the app refuses to change module settings and the ARM light is
+red.
+
+There is no per-channel arm flag, and there used to be one. Alongside it the
+app inferred "armed" from the source type, so a flight mode latched high on
+CH6 — or a one-way on CH7 — announced itself as an arm channel and blocked
+every settings write. Which channel means armed cannot be guessed from how a
+channel is mapped, because the same sources are used for everything else, so
+it is fixed instead. Map CH5 to whatever you arm with; map anything else to
+whatever you like and it stays out of the interlock.
 
 ### Resetting a latch from another channel
 
@@ -223,9 +231,23 @@ It fires **once** per movement. The button can turn the latch straight back
 on immediately, which is what resetting means — this is not an interlock
 that holds the channel down while the condition lasts.
 
-Both boxes are locked unless the source is `toggle` or `cycle`, the two
-sources that carry a latch. A `switch` reads its lever every frame, so there
-is nothing stored to reset. On a `cycle`, a reset returns it to position 1.
+Both boxes are locked unless the source is `toggle`, `oneway` or `cycle`,
+the sources that carry a latch. A `switch` reads its lever every frame, so
+there is nothing stored to reset. On a `cycle`, a reset returns it to
+position 1; on a `oneway`, it returns the channel to un-pressed.
+
+### One-way toggles
+
+A `oneway` is a toggle that only goes one way. The first press sets it high
+and it stays high, however many times it is pressed after that — there is no
+second press that takes it back. The only way back is a **reset by** channel,
+set up exactly as above.
+
+It is for the things a fumbled second press must not undo. A `toggle` used
+for something consequential is one stray press away from being switched off
+again, often without you noticing; a `oneway` cannot be, and getting it back
+takes a deliberate move on a different control. It arms nothing on its own:
+only CH5 does that, whatever a channel is mapped to.
 
 ### Multi-position switches
 
@@ -442,7 +464,7 @@ Other safety behaviour:
   meant to drop the link. `selftest.py` asserts on bytes written rather
   than on frames counted, because a settings frame is invisible to a frame
   counter while still being audible to the module.
-- Module settings are refused while a channel flagged **arm** reads high,
+- Module settings are refused while CH5, the arm channel, reads high,
   and a write attempted while the link is live asks first. A command that
   pauses for confirmation re-checks on the way through, so it cannot
   complete against a model armed while the dialog was open.
