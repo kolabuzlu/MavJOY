@@ -122,7 +122,8 @@ class App(tk.Tk):
         self.config(menu=menubar)
 
     LOGO_FILE = "mavjoyback.png"
-    LOGO_PX = 56            # tall enough to read, without stretching the row
+    LOGO_MARGIN = 3         # breathing room above and below
+    LOGO_MIN = 24           # below this it is not worth drawing
 
     def _load_logo(self, target_px):
         """The logo, scaled to about target_px tall, or None if it is absent.
@@ -137,18 +138,58 @@ class App(tk.Tk):
             img = tk.PhotoImage(file=path)
         except Exception:
             return None
-        factor = max(1, img.height() // max(1, target_px))
+        # Round the factor UP, so the result is never taller than asked
+        # for: rounding down overshoots, which is exactly the pixel or two
+        # that makes the panel grow.
+        factor = -(-img.height() // max(1, target_px))
         return img.subsample(factor, factor) if factor > 1 else img
+
+    def _place_logo(self, panel, rows):
+        """Put the logo in the gap the controls and the buttons leave.
+
+        Sized from what the two rows of controls already need, so the panel
+        never grows a pixel to make room for it: a logo is decoration and
+        must not push the working parts of the window about. Tk scales by
+        whole-number factors only, so the fit is to the largest factor that
+        still comes in under that height.
+
+        Packed last, which puts it inboard of the buttons, and with expand
+        so the row's slack goes to it and it sits centred in the gap rather
+        than against one end - and stays centred as the window is resized.
+        """
+        rows.update_idletasks()
+        available = rows.winfo_reqheight() - 2 * self.LOGO_MARGIN
+        if available < self.LOGO_MIN:
+            return
+
+        # Held on self: Tk discards an image nothing references, and the
+        # widget then just draws blank.
+        self._logo_img = self._load_logo(available)
+        if self._logo_img is None:
+            return
+        # The PNG has a solid black background and no alpha, so the label is
+        # told to match rather than leaving the panel colour framing a
+        # black square.
+        tk.Label(panel, image=self._logo_img, bg="#000000",
+                 borderwidth=0, highlightthickness=0).pack(
+            side="right", expand=True)
 
     def _build_top(self):
         top = ttk.LabelFrame(self, text="Link")
         top.pack(fill="x", padx=8, pady=(8, 4))
 
-        # The reference is kept on self because Tk discards an image
-        # nothing holds, which shows up as a widget that is simply blank.
-        self._logo_img = self._load_logo(self.LOGO_PX)
+        # Three things share this panel: the two rows of controls on the
+        # left, the buttons on the right, and the logo centred in what is
+        # left between them. The buttons sit at panel level rather than in
+        # the second row so that they and the logo are both centred on the
+        # panel's full height instead of on one row of it.
+        rows = ttk.Frame(top)
+        rows.pack(side="left")
 
-        row = ttk.Frame(top)
+        buttons = ttk.Frame(top)
+        buttons.pack(side="right", padx=4)
+
+        row = ttk.Frame(rows)
         row.pack(fill="x", padx=6, pady=6)
 
         ttk.Label(row, text="Serial port").pack(side="left")
@@ -178,7 +219,7 @@ class App(tk.Tk):
         self._rate_warned = None
         self._on_rate_auto()
 
-        row2 = ttk.Frame(top)
+        row2 = ttk.Frame(rows)
         row2.pack(fill="x", padx=6, pady=(0, 6))
 
         ttk.Label(row2, text="Gamepad").pack(side="left")
@@ -200,22 +241,14 @@ class App(tk.Tk):
         ttk.Button(row2, text="\u21bb", width=3,
                    command=self.refresh_gamepads).pack(side="left")
 
-        self.start_btn = ttk.Button(row2, text="START LINK", command=self.start_link)
+        self.start_btn = ttk.Button(buttons, text="START LINK",
+                                    command=self.start_link)
         self.start_btn.pack(side="right", padx=4)
-        self.stop_btn = ttk.Button(row2, text="STOP  (Esc)", state="disabled",
+        self.stop_btn = ttk.Button(buttons, text="STOP  (Esc)", state="disabled",
                                    command=lambda: self.stop_link(reason="stopped by user"))
         self.stop_btn.pack(side="right", padx=4)
 
-        # Inboard of the buttons, centred in whatever the row has left over.
-        # Packed after them so it lands to their left, and expand hands it
-        # the slack so it centres in that gap instead of butting up against
-        # one end of it. The PNG has a solid black background and no alpha,
-        # so the label is told to match rather than leaving the theme's
-        # panel colour framing a black square.
-        if self._logo_img is not None:
-            tk.Label(row2, image=self._logo_img, bg="#000000",
-                     borderwidth=0, highlightthickness=0).pack(
-                side="right", expand=True)
+        self._place_logo(top, rows)
 
         # ---- big live status strip
         status = ttk.Frame(self)
