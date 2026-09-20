@@ -41,7 +41,7 @@ FRAMETYPE_PARAMETER_SETTINGS_ENTRY = 0x2B
 FRAMETYPE_ELRS_STATUS = 0x2E
 
 # ---------------------------------------------------------- channel scaling
-# 172 = 988us (-100%), 992 = 1500us (centre), 1811 = 2012us (+100%)
+# 172 = 987us (-100%), 992 = 1500us (centre), 1811 = 2011us (+100%)
 CHANNEL_MIN = 172
 CHANNEL_MID = 992
 CHANNEL_MAX = 1811
@@ -119,13 +119,36 @@ def unpack_rc_channels(payload: bytes):
 
 
 # ------------------------------------------------------------- conversions
-def crsf_to_us(value: int) -> float:
-    """Convert a CRSF channel value to the servo pulse width it represents."""
-    return 988.0 + (value - CHANNEL_MIN) * (2012.0 - 988.0) / (CHANNEL_MAX - CHANNEL_MIN)
+# The flight controller's own arithmetic, not an approximation of it.
+# ArduPilot decodes CRSF with mult 5, div 8, offset 880 - integer division -
+# so the ends of the range read 987 and 2011, not the 988 and 2012 the round
+# numbers suggest. These figures exist to be compared against what the
+# flight controller reports, so they have to be worked out the same way it
+# works them out, down to the truncation.
+US_MIN = 987
+US_MID = 1500
+US_MAX = 2011
+
+
+def crsf_to_us(value: int) -> int:
+    """The pulse width a flight controller will report for this value."""
+    return (int(value) * 5) // 8 + 880
 
 
 def us_to_crsf(us: float) -> int:
-    return round(CHANNEL_MIN + (us - 988.0) * (CHANNEL_MAX - CHANNEL_MIN) / (2012.0 - 988.0))
+    """The channel value that reads back as `us`.
+
+    crsf_to_us throws the remainder away, so several channel values share a
+    microsecond and the mapping cannot be undone by arithmetic alone. Take
+    the nearest candidate that really does read back as the microseconds
+    asked for, and settle for the nearest one when none of them does.
+    """
+    target = int(round(us))
+    approx = int(round((target - 880) * 8.0 / 5.0))
+    for delta in (0, 1, -1, 2, -2):
+        if crsf_to_us(approx + delta) == target:
+            return approx + delta
+    return approx
 
 
 def norm_to_crsf(value: float) -> int:

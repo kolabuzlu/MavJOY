@@ -579,6 +579,29 @@ class ThrottleEngine:
         return self._trigger_value(st, idx)
 
 
+def _endpoint(value, default):
+    """Read an endpoint from config, carrying the old figures forward.
+
+    The Outputs tab first shipped with 988 and 2012, the round numbers the
+    CRSF range is usually quoted with. A flight controller reports 987 and
+    2011, so those were a microsecond out at both ends. Anything still
+    carrying the old pair meant full travel and is read as full travel,
+    rather than being left very slightly scaled for no reason anybody asked
+    for.
+    """
+    if value is None:
+        return default
+    try:
+        us = int(value)
+    except (TypeError, ValueError):
+        return default
+    if us == 988:
+        return crsf.US_MIN
+    if us == 2012:
+        return crsf.US_MAX
+    return max(crsf.US_MIN, min(crsf.US_MAX, us))
+
+
 @dataclass
 class ChannelMap:
     """How one RC channel gets its value."""
@@ -590,16 +613,22 @@ class ChannelMap:
     reset_move: int = 100          # how far it must move to count, in us
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
     steps: int = 3                 # positions, for "cycle" and "switch"
-    out_min: int = 988             # endpoint, in microseconds
-    out_max: int = 2012            # endpoint, in microseconds
+    out_min: int = crsf.US_MIN     # endpoint, in microseconds
+    out_max: int = crsf.US_MAX     # endpoint, in microseconds
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
 
     def __post_init__(self):
         # Worked out once here rather than per frame: the map is replaced
         # wholesale whenever anything about it is edited, so there is no
         # such thing as a stale copy.
-        self.lo_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_min))
-        self.hi_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_max))
+        # Snapped at the ends rather than converted: more than one channel
+        # value reads back as the same microsecond, so converting 2011 can
+        # land a unit short of the top and leave a channel fractionally
+        # scaled when it was meant to be left alone.
+        self.lo_units = (crsf.CHANNEL_MIN if self.out_min <= crsf.US_MIN
+                         else crsf.clamp_channel(crsf.us_to_crsf(self.out_min)))
+        self.hi_units = (crsf.CHANNEL_MAX if self.out_max >= crsf.US_MAX
+                         else crsf.clamp_channel(crsf.us_to_crsf(self.out_max)))
         self.full_travel = (self.lo_units == crsf.CHANNEL_MIN
                             and self.hi_units == crsf.CHANNEL_MAX)
 
@@ -623,8 +652,8 @@ class ChannelMap:
                    reset_move=int(d.get("reset_move", 100)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
                    steps=int(d.get("steps", 3)),
-                   out_min=int(d.get("out_min", 988)),
-                   out_max=int(d.get("out_max", 2012)),
+                   out_min=_endpoint(d.get("out_min"), crsf.US_MIN),
+                   out_max=_endpoint(d.get("out_max"), crsf.US_MAX),
                    buttons=tuple(d.get("buttons") or ()))
 
     def to_dict(self):
@@ -843,7 +872,7 @@ class Mixer:
     @staticmethod
     def _move_units(microseconds):
         """A movement in microseconds, as channel units."""
-        return max(1, crsf.us_to_crsf(988.0 + float(microseconds))
+        return max(1, crsf.us_to_crsf(crsf.US_MIN + float(microseconds))
                    - crsf.CHANNEL_MIN)
 
     # How far an input has to move after a link comes back before its

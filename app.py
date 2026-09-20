@@ -322,8 +322,8 @@ class App(tk.Tk):
         self._build_log_tab(nb)
 
     # ------------------------------------------------------------- outputs
-    OUT_MIN_US = 988
-    OUT_MAX_US = 2012
+    OUT_MIN_US = crsf.US_MIN
+    OUT_MAX_US = crsf.US_MAX
 
     def _build_outputs_tab(self, nb):
         tab = ttk.Frame(nb)

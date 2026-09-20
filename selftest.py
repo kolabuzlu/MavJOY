@@ -397,6 +397,15 @@ def _check_endpoints():
     cfg = configmod.default_config()
     cfg["channels"][0] = {"src": "axis", "idx": 0,
                           "out_min": 1100, "out_max": 1900}
+    # The ends of the range are the flight controller's numbers, worked out
+    # its way: mult 5, div 8, offset 880, integer division. Anything else
+    # reads a microsecond out at both ends and the two cannot be compared.
+    assert crsf.crsf_to_us(crsf.CHANNEL_MIN) == 987
+    assert crsf.crsf_to_us(crsf.CHANNEL_MID) == 1500
+    assert crsf.crsf_to_us(crsf.CHANNEL_MAX) == 2011
+    for us in (987, 1000, 1500, 1900, 2011):
+        assert crsf.crsf_to_us(crsf.us_to_crsf(us)) == us, (
+            f"{us} us does not survive the round trip")
     cfg["channels"][1] = {"src": "axis", "idx": 0}        # left at full travel
     m = gp.Mixer(cfg)
     m.reset()

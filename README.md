@@ -297,7 +297,7 @@ each press, and not a `button`, which only knows on and off.
 
 Use `switch`: **index** is the first button and **steps** is how many
 positions. For the example above, `switch`, index 8, steps 3 gives
-988 / 1500 / 2012 µs — exactly the three values a flight controller expects
+987 / 1500 / 2011 µs — exactly the three values a flight controller reports
 from a 3-position mode switch. `inv` reverses the order.
 
 Unlike `cycle` this reads the button state rather than counting presses, so
@@ -349,7 +349,7 @@ channel — a handset's output limits, and the last thing applied before a
 frame leaves. Everything else in the app works in full travel; these are the
 numbers the flight controller actually sees.
 
-Full right aileron sends 2012 µs by default. Set CH1's **max** to 1900 and it
+Full right aileron sends 2011 µs by default. Set CH1's **max** to 1900 and it
 sends 1900 instead, with the stick doing exactly what it did before.
 
 **Centre stays at 1500 and each half is scaled on its own.** Pulling max down
@@ -358,9 +358,17 @@ instead would drag neutral along with the endpoint, so trimming the top of an
 aileron throw would leave the model in a permanent turn — which is why a
 handset does not do it that way either.
 
-Both boxes clamp to 988–2012 µs. The **sent** column is live, so you can hold
+Both boxes clamp to 987–2011 µs. The **sent** column is live, so you can hold
 a stick over and read the number the receiver is being given. *Full travel on
-every channel* puts all sixteen back to 988/2012.
+every channel* puts all sixteen back to 987/2011.
+
+These are the flight controller's own figures, not the round numbers the
+CRSF range is usually quoted with. ArduPilot decodes a channel as
+`value * 5 / 8 + 880` in integer arithmetic, so the ends come out at 987 and
+2011 rather than 988 and 2012. MavJOY works them out the same way, down to
+the truncation, so a number here and the number the flight controller shows
+are the same number. Endpoints saved by the first version of this tab, which
+used the round figures, are read as full travel.
 
 Endpoints are per channel and independent of the mapping: change a channel's
 source or index and its endpoints stay as you set them.
@@ -620,7 +628,7 @@ Other safety behaviour:
 1. Props off. Bench test everything below before anything spins.
 2. Confirm each surface moves the right way in the FC's receiver tab — the app
    sends raw axes, so all reversing happens on the FC.
-3. Confirm 172 / 992 / 1811 show as 988 / 1500 / 2012 µs on the FC.
+3. Confirm 172 / 992 / 1811 show as 987 / 1500 / 2011 µs on the FC.
 4. Pull the F710's USB dongle out mid-test and confirm the RX goes to failsafe.
 5. Close the app while "armed" and confirm the same.
 6. **Your gamepad dongle and your TX are both on 2.4 GHz.** A 1 W transmitter
