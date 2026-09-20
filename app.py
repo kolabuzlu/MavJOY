@@ -1533,7 +1533,14 @@ class App(tk.Tk):
 
         # ---- link state
         if running and self.link.transmitting:
-            self.link_lbl.config(text="TRANSMITTING", bg=self.pal["ok"])
+            # Held channels are not following their sticks, which without a
+            # word of explanation reads as a broken controller.
+            held = self.mixer.holding()
+            if held:
+                self.link_lbl.config(text=f"HOLDING {len(held)} CH",
+                                     bg=self.pal["warn"])
+            else:
+                self.link_lbl.config(text="TRANSMITTING", bg=self.pal["ok"])
         elif running:
             self.link_lbl.config(text="PORT OPEN / NO TX", bg=self.pal["warn"])
         else:
@@ -1552,10 +1559,18 @@ class App(tk.Tk):
             else:
                 self.rf_lbl.config(text="no telemetry")
                 self._set_lq(None)
-            self.status_var.set(
-                f"sent {stats.frames_sent}   skipped {stats.frames_skipped}   "
-                f"telemetry frames {stats.telem_frames}   crc errors {stats.crc_errors}"
-                f"   write errors {stats.write_errors}")
+            held = self.mixer.holding()
+            if held:
+                names = ", ".join(f"CH{n}" for n in held[:6])
+                more = f" +{len(held) - 6} more" if len(held) > 6 else ""
+                self.status_var.set(
+                    f"holding {names}{more} at the values last sent - move a "
+                    f"control to take it back")
+            else:
+                self.status_var.set(
+                    f"sent {stats.frames_sent}   skipped {stats.frames_skipped}   "
+                    f"telemetry frames {stats.telem_frames}   crc errors "
+                    f"{stats.crc_errors}   write errors {stats.write_errors}")
             self._update_telemetry(telem, stats)
         else:
             self.rate_lbl.config(text="\u2014 Hz")

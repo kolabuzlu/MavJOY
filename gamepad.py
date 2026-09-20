@@ -642,6 +642,8 @@ class Mixer:
         self._cycles = {}
         self._switches = {}
         self._reset_ref = {}         # channel -> where its watched channel was
+        self._held = {}              # channel -> value frozen at a resume
+        self._hold_ref = {}          # channel -> where its input was then
         self._prev_buttons = {}
         self.throttle_dev = int(config.get("throttle", {}).get("dev", 0))
         self._last_t = None
@@ -717,6 +719,8 @@ class Mixer:
         self._cycles.clear()
         self._switches.clear()
         self._reset_ref.clear()
+        self._held.clear()
+        self._hold_ref.clear()
         self._prev_buttons = {}
         self._last_t = None
         self.throttle.reset()
@@ -773,6 +777,7 @@ class Mixer:
             vals.append(self._channel_value(ch, st or _BLANK_STATE, thr,
                                             edges.get(ch.dev, _NO_EDGES)))
         self._apply_resets(vals)
+        self._apply_hold(vals)
         self.last_values = vals
         return vals
 
@@ -781,6 +786,49 @@ class Mixer:
         """A movement in microseconds, as channel units."""
         return max(1, crsf.us_to_crsf(988.0 + float(microseconds))
                    - crsf.CHANNEL_MIN)
+
+    # How far an input has to move after a link comes back before its
+    # channel starts following it again. About 2% of travel: enough that a
+    # resting stick does not release itself, small enough that a deliberate
+    # nudge does.
+    RESUME_RELEASE = 32
+
+    def hold_on_resume(self):
+        """Freeze every channel at the value last actually transmitted.
+
+        Called the moment frames start flowing again after a dropout, and
+        before the fresh input is read. Without it, anything moved while the
+        link was down takes effect the instant it returns - and if that
+        included the flight mode, the aircraft leaves the failsafe it was
+        holding, which is the one thing recovery must not do on its own.
+
+        Each channel stays frozen until its own input moves again. That move
+        is the pilot deliberately taking the channel back, so it is the only
+        thing that should hand control over.
+        """
+        self._held = {i: v for i, v in enumerate(self.last_values)}
+        self._hold_ref = {}
+
+    def holding(self):
+        """Channel numbers still frozen since the last resume."""
+        return sorted(i + 1 for i in self._held)
+
+    def _apply_hold(self, vals):
+        if not self._held:
+            return
+        for i in list(self._held):
+            if i >= len(vals):
+                del self._held[i]
+                continue
+            # Measured against where the input sat when the link returned,
+            # not against the frozen value - the two differ precisely when
+            # something was moved during the outage, which must NOT count.
+            ref = self._hold_ref.setdefault(i, vals[i])
+            if abs(vals[i] - ref) >= self.RESUME_RELEASE:
+                del self._held[i]
+                self._hold_ref.pop(i, None)
+                continue
+            vals[i] = self._held[i]
 
     def _apply_resets(self, vals):
         """Drop a latch back to low when another channel moves.

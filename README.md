@@ -160,6 +160,26 @@ throttle and the throttle engine reads the pad. Matched on identity, a
 device returns to the slot it left, and a slot whose device is absent stays
 empty rather than grabbing whatever is nearest.
 
+**Coming back does not hand control over on its own.** When frames start
+flowing again, every channel keeps sending the value it was last actually
+transmitting, and only starts following its stick again once you move that
+stick. Move nothing and nothing changes; move the flight mode switch and
+that channel — and only that one — takes effect.
+
+This exists because of what a flight controller does with the first frame
+after a dropout. ArduPilot holds its failsafe, RTL, until the mode channel
+changes. If something was knocked while the link was down, the old code
+sent that new position the instant the link returned, the FC read it as a
+deliberate mode change, and the aircraft left the failsafe it should have
+been holding. Now the aircraft stays in RTL until you actually move the
+switch, which is the only thing that should ever take it out.
+
+While channels are held the link chip reads **HOLDING n CH** in amber and
+the status bar names them, because a stick that is not moving its channel
+otherwise looks like a broken controller. A channel releases as soon as its
+input moves about 2% of travel, so a resting stick will not release itself
+and a deliberate nudge will.
+
 **Losing a device stops the pulses; it does not shut the transmitter
 down.** This is the behaviour of any RC transmitter: frames stop going out,
 the receiver sees no pulses and falls into its own failsafe, and when the

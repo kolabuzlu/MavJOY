@@ -211,6 +211,7 @@ class CrsfLink(threading.Thread):
         self.telemetry = {}
         self.running = False
         self.transmitting = False   # True while we are actually sending frames
+        self._sent_before = False   # has this link ever sent a frame
         self._parser = crsf.Parser()
         self._ser = None
 
@@ -370,6 +371,17 @@ class CrsfLink(threading.Thread):
         states = self.gamepad.states
         stale_slot, st = self._first_stale(states)
 
+        # Frames are about to start flowing again after a gap. Freeze the
+        # channels at what was last actually sent, BEFORE the fresh input is
+        # read, so anything moved while the link was down does not take
+        # effect the instant it returns. If that included the flight mode,
+        # the aircraft would leave the failsafe it was holding - recovery
+        # must never do that by itself.
+        resuming = (stale_slot is None and not self.transmitting
+                    and self._sent_before)
+        if resuming:
+            self.mixer.hold_on_resume()
+
         # Computed on every tick, reporting or not. The mixer then always
         # holds a current picture - which is what the arm interlock reads -
         # and devices that ARE still reporting keep their edges tracked.
@@ -406,6 +418,11 @@ class CrsfLink(threading.Thread):
 
         if not self.transmitting:
             self.transmitting = True
+            self._sent_before = True
+            if resuming:
+                self.on_event("warn", "Input is back. Every channel holds the "
+                                      "value last sent until you move it, so "
+                                      "the model stays in its failsafe.")
             self.on_event("info", "Transmitting channel data")
 
         frame = crsf.pack_rc_channels(values, sync=self.sync_byte)
