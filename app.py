@@ -36,7 +36,7 @@ def fmt_channel(value: int) -> str:
 class App(tk.Tk):
     def __init__(self, simulate=False):
         super().__init__()
-        self.title("MavJOY \u2014 gamepad \u2192 CRSF \u2192 ExpressLRS")
+        self.title("MavJOY")
         self.geometry("1000x760")
         self.minsize(900, 700)
 
