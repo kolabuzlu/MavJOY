@@ -234,57 +234,81 @@ class App(tk.Tk):
         self._render_fields()
 
     # ------------------------------------------------------------ channels
+    # One grid holds the headings and every row, so a column is a column and
+    # nothing has to be lined up by guessing widths.
+    CH_COLUMNS = (
+        # heading,   anchor, pad-left, pad-right, stretch
+        ("",         "w",     0,  6, 0),   # 0 CH number
+        ("source",   "w",     0,  6, 0),   # 1 source
+        ("index",    "w",     0,  6, 0),   # 2 index
+        ("inv",      "center", 0, 6, 0),   # 3 invert
+        ("steps",    "w",     0, 14, 0),   # 4 steps
+        ("value",    "w",     0,  8, 1),   # 5 bar
+        ("",         "e",     0, 10, 0),   # 6 numeric value
+        ("",         "w",     0,  0, 0),   # 7 hint
+    )
+
     def _build_channels_tab(self, nb):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Channels")
 
-        hdr = ttk.Frame(tab)
-        hdr.pack(fill="x", padx=8, pady=(8, 2))
-        for text, width in (("", 5), ("source", 10), ("index", 7), ("inv", 5),
-                            ("steps", 7), ("value", 40), ("", 18)):
-            ttk.Label(hdr, text=text, width=width).pack(side="left")
+        grid = ttk.Frame(tab)
+        grid.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+
+        for col, (title, anchor, padl, padr, stretch) in enumerate(self.CH_COLUMNS):
+            grid.columnconfigure(col, weight=stretch)
+            ttk.Label(grid, text=title, anchor=anchor,
+                      foreground=self.pal["muted"]).grid(
+                row=0, column=col, sticky="ew", padx=(padl, padr), pady=(0, 2))
+
+        ttk.Separator(grid, orient="horizontal").grid(
+            row=1, column=0, columnspan=len(self.CH_COLUMNS),
+            sticky="ew", pady=(0, 6))
 
         self.ch_widgets = []
-        body = ttk.Frame(tab)
-        body.pack(fill="both", expand=True, padx=8)
-
         for i in range(crsf.NUM_CHANNELS):
             chcfg = self.mixer.channels[i]
-            row = ttk.Frame(body)
-            row.pack(fill="x", pady=1)
+            row = i + 2
 
-            ttk.Label(row, text=f"CH{i + 1}", width=5,
-                      font=("TkDefaultFont", 9, "bold")).pack(side="left")
+            def place(widget, col, sticky="w"):
+                _t, _a, padl, padr, _s = self.CH_COLUMNS[col]
+                widget.grid(row=row, column=col, sticky=sticky,
+                            padx=(padl, padr), pady=2)
+                return widget
+
+            place(ttk.Label(grid, text=f"CH{i + 1}",
+                            font=("TkDefaultFont", 9, "bold")), 0)
 
             src = tk.StringVar(value=chcfg.src)
-            combo = ttk.Combobox(row, textvariable=src, width=9, state="readonly",
-                                 values=list(gp.SOURCES))
-            combo.pack(side="left", padx=1)
+            combo = ttk.Combobox(grid, textvariable=src, width=9,
+                                 state="readonly", values=list(gp.SOURCES))
+            place(combo, 1)
             combo.bind("<<ComboboxSelected>>",
                        lambda _e, n=i: self.on_channel_changed(n))
 
             idx = tk.StringVar(value=str(chcfg.idx))
-            spin = ttk.Spinbox(row, from_=0, to=31, width=4, textvariable=idx,
+            spin = ttk.Spinbox(grid, from_=0, to=31, width=5, textvariable=idx,
                                command=lambda n=i: self.on_channel_changed(n))
-            spin.pack(side="left", padx=(6, 8))
+            place(spin, 2)
             spin.bind("<KeyRelease>", lambda _e, n=i: self.on_channel_changed(n))
 
             inv = tk.BooleanVar(value=chcfg.inv)
-            ttk.Checkbutton(row, variable=inv,
-                            command=lambda n=i: self.on_channel_changed(n)
-                            ).pack(side="left", padx=(6, 10))
+            place(ttk.Checkbutton(grid, variable=inv,
+                                  command=lambda n=i: self.on_channel_changed(n)),
+                  3, sticky="")
 
             steps = tk.IntVar(value=chcfg.steps)
-            sspin = ttk.Spinbox(row, from_=2, to=6, width=3, textvariable=steps,
-                                command=lambda n=i: self.on_channel_changed(n))
-            sspin.pack(side="left", padx=(0, 14))
+            place(ttk.Spinbox(grid, from_=2, to=6, width=3, textvariable=steps,
+                              command=lambda n=i: self.on_channel_changed(n)), 4)
 
-            bar = ttk.Progressbar(row, length=220, maximum=1000)
-            bar.pack(side="left")
-            val = ttk.Label(row, text="\u2014", width=16, anchor="w")
-            val.pack(side="left", padx=6)
-            ttk.Label(row, text=configmod.CHANNEL_HINTS[i], width=16,
-                      foreground=self.pal["muted"]).pack(side="left")
+            bar = ttk.Progressbar(grid, maximum=1000)
+            place(bar, 5, sticky="ew")
+
+            val = ttk.Label(grid, text="—", anchor="e", width=14)
+            place(val, 6, sticky="e")
+
+            place(ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
+                            foreground=self.pal["muted"]), 7)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
@@ -292,10 +316,10 @@ class App(tk.Tk):
             self._sync_index_widget(i)
 
         ttk.Label(tab, text="Mapping is one input to one channel. No mixing, no expo, "
-                            "no curves \u2014 do all of that on the flight controller.",
-                  foreground=self.pal["muted"]).pack(anchor="w", padx=8, pady=(10, 2))
+                            "no curves — do all of that on the flight controller.",
+                  foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 2))
         self.src_help = ttk.Label(tab, text="", foreground=self.pal["faint"])
-        self.src_help.pack(anchor="w", padx=8)
+        self.src_help.pack(anchor="w", padx=10, pady=(0, 8))
 
     # ------------------------------------------------------------ throttle
     def _build_throttle_tab(self, nb):
