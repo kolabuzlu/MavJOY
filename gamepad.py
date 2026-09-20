@@ -584,6 +584,8 @@ class ChannelMap:
     inv: bool = False
     dev: int = 0                   # which gamepad slot this reads
     arm: bool = False              # treat high on this channel as armed
+    reset_ch: int = 0              # 1-16: a latch drops low when that moves
+    reset_move: int = 100          # how far it must move to count, in us
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
     steps: int = 3                 # positions, for "cycle" and "switch"
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
@@ -604,6 +606,8 @@ class ChannelMap:
         return cls(src=d.get("src", "none"), idx=int(d.get("idx", 0)),
                    inv=bool(d.get("inv", False)),
                    dev=int(d.get("dev", 0)), arm=bool(d.get("arm", False)),
+                   reset_ch=int(d.get("reset_ch", 0)),
+                   reset_move=int(d.get("reset_move", 100)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
                    steps=int(d.get("steps", 3)),
                    buttons=tuple(d.get("buttons") or ()))
@@ -611,6 +615,7 @@ class ChannelMap:
     def to_dict(self):
         out = {"src": self.src, "idx": self.idx, "inv": self.inv,
                "dev": self.dev, "arm": self.arm,
+               "reset_ch": self.reset_ch, "reset_move": self.reset_move,
                "value": self.value, "steps": self.steps}
         if self.buttons:
             out["buttons"] = list(self.buttons)
@@ -636,6 +641,7 @@ class Mixer:
         self._toggles = {}
         self._cycles = {}
         self._switches = {}
+        self._reset_ref = {}         # channel -> where its watched channel was
         self._prev_buttons = {}
         self.throttle_dev = int(config.get("throttle", {}).get("dev", 0))
         self._last_t = None
@@ -710,6 +716,7 @@ class Mixer:
         self._toggles.clear()
         self._cycles.clear()
         self._switches.clear()
+        self._reset_ref.clear()
         self._prev_buttons = {}
         self._last_t = None
         self.throttle.reset()
@@ -765,8 +772,52 @@ class Mixer:
                 continue
             vals.append(self._channel_value(ch, st or _BLANK_STATE, thr,
                                             edges.get(ch.dev, _NO_EDGES)))
+        self._apply_resets(vals)
         self.last_values = vals
         return vals
+
+    @staticmethod
+    def _move_units(microseconds):
+        """A movement in microseconds, as channel units."""
+        return max(1, crsf.us_to_crsf(988.0 + float(microseconds))
+                   - crsf.CHANNEL_MIN)
+
+    def _apply_resets(self, vals):
+        """Drop a latch back to low when another channel moves.
+
+        Watches the channel named by reset_ch and fires once it has moved
+        further than reset_move from where it was the last time this fired.
+        A floor is needed because a resting stick is never perfectly still;
+        without one an axis would hold the latch down permanently. Firing is
+        a one-shot - the button can turn the latch straight back on - which
+        is what resetting means, as opposed to an interlock that holds it.
+        """
+        for i, ch in enumerate(self.channels):
+            if ch.src not in ("toggle", "cycle") or not ch.reset_ch:
+                continue
+            watched = ch.reset_ch - 1
+            if not (0 <= watched < len(vals)) or watched == i:
+                continue
+
+            moved = self._move_units(ch.reset_move)
+            ref = self._reset_ref.get(i)
+            if ref is None:
+                self._reset_ref[i] = vals[watched]   # first frame: baseline
+                continue
+            if abs(vals[watched] - ref) < moved:
+                continue
+            self._reset_ref[i] = vals[watched]
+
+            key = (ch.dev, ch.idx)
+            if ch.src == "toggle":
+                if self._toggles.get(key, False) == ch.inv:
+                    continue                         # already low
+                self._toggles[key] = ch.inv          # latch xor inv -> low
+            else:
+                if self._cycles.get(key, 0) == 0:
+                    continue
+                self._cycles[key] = 0
+            vals[i] = self._channel_value(ch, _BLANK_STATE, 0.0, _NO_EDGES)
 
     def required_devices(self):
         """Slots the map actually reads.

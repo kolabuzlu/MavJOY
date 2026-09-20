@@ -279,9 +279,11 @@ class App(tk.Tk):
         ("inv",      "center",  0,  6, 0),   # 4 invert
         ("arm",      "center",  0,  8, 0),   # 5 counts as armed
         ("steps",    "w",       0, 14, 0),   # 6 steps
-        ("value",    "w",       0,  8, 1),   # 7 bar
-        ("",         "e",       0, 10, 0),   # 8 numeric value
-        ("",         "w",       0,  0, 0),   # 9 hint
+        ("reset by",  "w",      0,  6, 0),   # 7 latch reset: watched channel
+        ("moves",    "w",       0, 14, 0),   # 8 latch reset: how far, in us
+        ("value",    "w",       0,  8, 1),   # 9 bar
+        ("",         "e",       0, 10, 0),   # 10 numeric value
+        ("",         "w",       0,  0, 0),   # 11 hint
     )
 
     def _build_channels_tab(self, nb):
@@ -351,19 +353,39 @@ class App(tk.Tk):
                                      command=lambda n=i: self.on_channel_changed(n))
             place(steps_spin, 6)
 
+            reset_ch = tk.StringVar(value=self._reset_label(chcfg.reset_ch))
+            reset_combo = ttk.Combobox(
+                grid, textvariable=reset_ch, width=6, state="readonly",
+                values=[self.NO_INDEX] + [f"CH{n}" for n in
+                                          range(1, crsf.NUM_CHANNELS + 1)])
+            place(reset_combo, 7)
+            reset_combo.bind("<<ComboboxSelected>>",
+                             lambda _e, n=i: self.on_channel_changed(n))
+
+            reset_move = tk.StringVar(value=str(chcfg.reset_move))
+            reset_spin = ttk.Spinbox(grid, from_=10, to=500, increment=10,
+                                     width=5, textvariable=reset_move,
+                                     command=lambda n=i: self.on_channel_changed(n))
+            place(reset_spin, 8)
+            reset_spin.bind("<KeyRelease>",
+                            lambda _e, n=i: self.on_channel_changed(n))
+
             bar = ttk.Progressbar(grid, maximum=1000)
-            place(bar, 7, sticky="ew")
+            place(bar, 9, sticky="ew")
 
             val = ttk.Label(grid, text="—", anchor="e", width=14)
-            place(val, 8, sticky="e")
+            place(val, 10, sticky="e")
 
             place(ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
-                            foreground=self.pal["muted"]), 9)
+                            foreground=self.pal["muted"]), 11)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
                                     "spin": spin, "steps_spin": steps_spin,
-                                    "dev": dev, "arm": arm})
+                                    "dev": dev, "arm": arm,
+                                    "reset_ch": reset_ch, "reset_move": reset_move,
+                                    "reset_combo": reset_combo,
+                                    "reset_spin": reset_spin})
             self._sync_row_widgets(i)
 
         ttk.Label(tab, text="Mapping is one input to one channel. No mixing, no expo, "
@@ -786,6 +808,15 @@ class App(tk.Tk):
 
     NO_INDEX = "none"
 
+    def _reset_label(self, channel):
+        return self.NO_INDEX if not channel else f"CH{channel}"
+
+    def _reset_value(self, text):
+        text = str(text).strip().lower()
+        if text in ("", self.NO_INDEX) or not text.startswith("ch"):
+            return 0
+        return max(0, min(crsf.NUM_CHANNELS, int(text[2:])))
+
     def _sync_row_widgets(self, n):
         """Show none and lock the boxes a source does not use, rather than
         leaving a number sitting there implying it does something.
@@ -810,6 +841,20 @@ class App(tk.Tk):
             w["steps"].set(self.NO_INDEX)
             w["steps_spin"].config(state="disabled")
 
+        # Only a latch has anything to reset. A switch reads its lever every
+        # frame, so there is no stored state to clear.
+        if ch.src in ("toggle", "cycle"):
+            w["reset_combo"].config(state="readonly")
+            w["reset_ch"].set(self._reset_label(ch.reset_ch))
+            w["reset_spin"].config(
+                state="normal" if ch.reset_ch else "disabled")
+            w["reset_move"].set(str(ch.reset_move))
+        else:
+            w["reset_ch"].set(self.NO_INDEX)
+            w["reset_move"].set(self.NO_INDEX)
+            w["reset_combo"].config(state="disabled")
+            w["reset_spin"].config(state="disabled")
+
     def on_channel_changed(self, n):
         """Rebuild a channel from the widgets and swap it in as one object.
 
@@ -826,6 +871,7 @@ class App(tk.Tk):
         try:
             raw_idx = str(w["idx"].get()).strip().lower()
             raw_steps = str(w["steps"].get()).strip().lower()
+            raw_move = str(w["reset_move"].get()).strip().lower()
             # The boxes read "none" for whatever the source does not use;
             # that is the widget being blanked, not a request for zero.
             new = gp.ChannelMap(
@@ -838,6 +884,11 @@ class App(tk.Tk):
                 value=old.value,
                 steps=old.steps if raw_steps in ("", self.NO_INDEX)
                       else max(2, min(6, int(raw_steps))),
+                reset_ch=self._reset_value(w["reset_ch"].get()),
+                # "none" here is the box being blanked for a source that has
+                # no latch, exactly as for index and steps - not a value.
+                reset_move=old.reset_move if raw_move in ("", self.NO_INDEX)
+                           else max(10, min(500, int(raw_move))),
                 buttons=old.buttons)
         except (tk.TclError, ValueError):
             return              # nothing applied; the channel is as it was

@@ -185,6 +185,28 @@ the app refuses to change module settings and the ARM light is red. A
 old behaviour; the flag is what lets a three-position switch or a held
 button arm safely too.
 
+### Resetting a latch from another channel
+
+A `toggle` remembers its state, which is the point of it — but sometimes you
+want it dropped back to low by something else entirely, without reaching for
+the button. Set **reset by** on the toggle's row to the channel that should
+do it, and **moves** to how far that channel has to move, in microseconds.
+
+Movement, not a position: the latch is cleared whenever the watched channel
+travels further than that from where it was the last time it fired. A floor
+is needed because a resting stick is never perfectly still — at the default
+100 µs a deliberate move triggers it and normal jitter does not. Lower it if
+the watched channel is a switch and you want a hair trigger; raise it if the
+channel is a noisy axis.
+
+It fires **once** per movement. The button can turn the latch straight back
+on immediately, which is what resetting means — this is not an interlock
+that holds the channel down while the condition lasts.
+
+Both boxes are locked unless the source is `toggle` or `cycle`, the two
+sources that carry a latch. A `switch` reads its lever every frame, so there
+is nothing stored to reset. On a `cycle`, a reset returns it to position 1.
+
 ### Multi-position switches
 
 A three-way switch on a gamepad usually reports as three separate buttons
