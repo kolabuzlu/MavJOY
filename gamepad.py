@@ -590,7 +590,18 @@ class ChannelMap:
     reset_move: int = 100          # how far it must move to count, in us
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
     steps: int = 3                 # positions, for "cycle" and "switch"
+    out_min: int = 988             # endpoint, in microseconds
+    out_max: int = 2012            # endpoint, in microseconds
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
+
+    def __post_init__(self):
+        # Worked out once here rather than per frame: the map is replaced
+        # wholesale whenever anything about it is edited, so there is no
+        # such thing as a stale copy.
+        self.lo_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_min))
+        self.hi_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_max))
+        self.full_travel = (self.lo_units == crsf.CHANNEL_MIN
+                            and self.hi_units == crsf.CHANNEL_MAX)
 
     def switch_buttons(self):
         """The buttons a switch watches, one per position.
@@ -612,13 +623,16 @@ class ChannelMap:
                    reset_move=int(d.get("reset_move", 100)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
                    steps=int(d.get("steps", 3)),
+                   out_min=int(d.get("out_min", 988)),
+                   out_max=int(d.get("out_max", 2012)),
                    buttons=tuple(d.get("buttons") or ()))
 
     def to_dict(self):
         out = {"src": self.src, "idx": self.idx, "inv": self.inv,
                "dev": self.dev,
                "reset_ch": self.reset_ch, "reset_move": self.reset_move,
-               "value": self.value, "steps": self.steps}
+               "value": self.value, "steps": self.steps,
+               "out_min": self.out_min, "out_max": self.out_max}
         if self.buttons:
             out["buttons"] = list(self.buttons)
         return out
@@ -651,6 +665,9 @@ class Mixer:
         self.throttle_dev = int(config.get("throttle", {}).get("dev", 0))
         self._last_t = None
         self.last_values = [crsf.CHANNEL_MID] * crsf.NUM_CHANNELS
+        # What actually goes on the wire: last_values with the endpoints
+        # applied. Kept apart so the two are never confused for each other.
+        self.output_values = list(self.last_values)
 
     @staticmethod
     def _load_axis_deadzone(config):
@@ -730,6 +747,7 @@ class Mixer:
         self._last_t = None
         self.throttle.reset()
         self.last_values = self.failsafe_values()
+        self.output_values = self._apply_endpoints(self.last_values)
 
     def failsafe_values(self):
         vals = [crsf.CHANNEL_MID] * crsf.NUM_CHANNELS
@@ -741,6 +759,41 @@ class Mixer:
             elif ch.src == "fixed":
                 vals[i] = ch.value
         return vals
+
+    def _apply_endpoints(self, vals):
+        """Scale each channel onto its endpoints; returns a new list.
+
+        The output stage, and the last thing that happens. Everything above
+        works in full travel and this is where full travel is told what it
+        is worth in microseconds.
+
+        Centre is held at 1500 and the two halves are scaled independently,
+        the way a handset's output limits work. Scaling the whole range
+        instead would drag neutral along with the endpoint, so trimming the
+        top of an aileron throw would leave the model in a permanent turn.
+
+        The result is returned rather than written back, because the full
+        travel values are what the next frame reasons from - feeding scaled
+        values back in would scale them again, and a held channel would
+        creep toward centre a little more every frame.
+        """
+        out = list(vals)
+        for i, ch in enumerate(self.channels):
+            if ch.full_travel or i >= len(out):
+                continue
+            v = out[i]
+            if v >= crsf.CHANNEL_MID:
+                span = crsf.CHANNEL_MAX - crsf.CHANNEL_MID
+                out[i] = crsf.CHANNEL_MID + round(
+                    (v - crsf.CHANNEL_MID) * (ch.hi_units - crsf.CHANNEL_MID)
+                    / span)
+            else:
+                span = crsf.CHANNEL_MID - crsf.CHANNEL_MIN
+                out[i] = crsf.CHANNEL_MID - round(
+                    (crsf.CHANNEL_MID - v) * (crsf.CHANNEL_MID - ch.lo_units)
+                    / span)
+            out[i] = crsf.clamp_channel(out[i])
+        return out
 
     def compute(self, states):
         """Evaluate every channel. `states` is {slot: InputState}; a bare
@@ -784,7 +837,8 @@ class Mixer:
         self._apply_resets(vals)
         self._apply_hold(vals)
         self.last_values = vals
-        return vals
+        self.output_values = self._apply_endpoints(vals)
+        return self.output_values
 
     @staticmethod
     def _move_units(microseconds):

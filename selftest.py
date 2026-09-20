@@ -382,6 +382,50 @@ def _check_latch_memory():
     assert 5 not in kept, "a remapped channel must not take the old latch"
 
 
+def _check_endpoints():
+    """Endpoints scale the output, hold centre, and do not compound.
+
+    The compounding case is the one worth testing: the scaled value is what
+    goes on the wire, but the full-travel value is what the next frame
+    reasons from. Confuse the two and a channel holding its previous value
+    gets scaled again every frame, creeping toward centre a few
+    microseconds at a time - slowly enough to look like drift rather than a
+    bug.
+    """
+    print("")
+    print("-- output endpoints --")
+    cfg = configmod.default_config()
+    cfg["channels"][0] = {"src": "axis", "idx": 0,
+                          "out_min": 1100, "out_max": 1900}
+    cfg["channels"][1] = {"src": "axis", "idx": 0}        # left at full travel
+    m = gp.Mixer(cfg)
+    m.reset()
+
+    def frame(axis=0.0, connected=True):
+        st = gp.InputState(axes=(axis, 0.0, 0.0, 0.0), buttons=(False,) * 8,
+                           hats=((0, 0),), timestamp=time.monotonic(),
+                           device_name="fake", connected=connected)
+        return m.compute({0: st})
+
+    for axis, want in ((-1.0, 1100), (0.0, 1500), (1.0, 1900)):
+        v = frame(axis)
+        got, plain = crsf.crsf_to_us(v[0]), crsf.crsf_to_us(v[1])
+        print(f"   stick {axis:+.0f}: CH1 = {got:4.0f} us   "
+              f"CH2 (full travel) = {plain:4.0f} us")
+        assert abs(got - want) < 2, f"CH1 should be {want}, got {got:.0f}"
+
+    assert abs(crsf.crsf_to_us(frame(0.0)[0]) - 1500) < 2, (
+        "centre must not move when an endpoint does")
+
+    frame(1.0)
+    for _ in range(200):
+        held = m.compute({0: gp.InputState(connected=False,
+                                           timestamp=time.monotonic())})
+    crept = crsf.crsf_to_us(held[0])
+    print(f"   200 frames with the device gone: {crept:.0f} us")
+    assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -550,6 +594,7 @@ def _run(wire):
     _check_arm_is_ch5()
     _check_arm_from_model()
     _check_latch_memory()
+    _check_endpoints()
 
     lk.stop()
     lk.join(timeout=2)

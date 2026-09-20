@@ -13,6 +13,7 @@ as if a handset were plugged into it.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import queue
 import sys
@@ -315,9 +316,117 @@ class App(tk.Tk):
         self._build_channels_tab(nb)
         self._build_throttle_tab(nb)
         self._build_inputs_tab(nb)
+        self._build_outputs_tab(nb)
         self._build_module_tab(nb)
         self._build_telemetry_tab(nb)
         self._build_log_tab(nb)
+
+    # ------------------------------------------------------------- outputs
+    OUT_MIN_US = 988
+    OUT_MAX_US = 2012
+
+    def _build_outputs_tab(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Outputs")
+
+        ttk.Label(tab, wraplength=900, justify="left",
+                  foreground=self.pal["muted"],
+                  text="What full travel is worth in microseconds, per "
+                       "channel. Everything else in the app works in full "
+                       "travel; this is the last thing applied before a "
+                       "frame goes out, so these are the numbers the flight "
+                       "controller sees.").pack(anchor="w", padx=10,
+                                                pady=(10, 2))
+        ttk.Label(tab, wraplength=900, justify="left",
+                  foreground=self.pal["muted"],
+                  text="Centre stays at 1500 and each half is scaled on its "
+                       "own, the way a handset's output limits work. Pulling "
+                       "max down to 1900 shortens the throw one way without "
+                       "moving neutral — scaling the whole range instead "
+                       "would drag neutral with it and leave the model "
+                       "permanently out of trim.").pack(anchor="w", padx=10,
+                                                        pady=(0, 8))
+
+        grid = ttk.Frame(tab)
+        grid.pack(fill="both", expand=True, padx=10)
+        for col, (title, weight) in enumerate(
+                (("", 0), ("", 0), ("min µs", 0), ("max µs", 0),
+                 ("sent", 0), ("", 1))):
+            grid.columnconfigure(col, weight=weight)
+            ttk.Label(grid, text=title, foreground=self.pal["muted"]).grid(
+                row=0, column=col, sticky="w", padx=(0, 10), pady=(0, 2))
+        ttk.Separator(grid, orient="horizontal").grid(
+            row=1, column=0, columnspan=6, sticky="ew", pady=(0, 6))
+
+        self.out_widgets = []
+        for i in range(crsf.NUM_CHANNELS):
+            ch = self.mixer.channels[i]
+            row = i + 2
+            ttk.Label(grid, text=f"CH{i + 1}",
+                      font=("TkDefaultFont", 9, "bold")).grid(
+                row=row, column=0, sticky="w", padx=(0, 10), pady=2)
+            ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
+                      foreground=self.pal["muted"]).grid(
+                row=row, column=1, sticky="w", padx=(0, 10))
+
+            lo = tk.StringVar(value=str(ch.out_min))
+            lo_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
+                                  increment=10, width=6, textvariable=lo,
+                                  command=lambda n=i: self.on_output_changed(n))
+            lo_spin.grid(row=row, column=2, sticky="w", padx=(0, 10))
+            lo_spin.bind("<KeyRelease>",
+                         lambda _e, n=i: self.on_output_changed(n))
+
+            hi = tk.StringVar(value=str(ch.out_max))
+            hi_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
+                                  increment=10, width=6, textvariable=hi,
+                                  command=lambda n=i: self.on_output_changed(n))
+            hi_spin.grid(row=row, column=3, sticky="w", padx=(0, 10))
+            hi_spin.bind("<KeyRelease>",
+                         lambda _e, n=i: self.on_output_changed(n))
+
+            sent = ttk.Label(grid, text="—", width=12, anchor="e")
+            sent.grid(row=row, column=4, sticky="e", padx=(0, 10))
+
+            bar = ttk.Progressbar(grid, maximum=1000)
+            bar.grid(row=row, column=5, sticky="ew", pady=2)
+
+            self.out_widgets.append({"lo": lo, "hi": hi, "sent": sent,
+                                     "bar": bar})
+
+        foot = ttk.Frame(tab)
+        foot.pack(fill="x", padx=10, pady=8)
+        ttk.Button(foot, text="Full travel on every channel",
+                   command=self.reset_outputs).pack(side="left")
+
+    def on_output_changed(self, i):
+        """Swap one channel's endpoints in, whole.
+
+        A new ChannelMap replaces the old one in a single assignment, the
+        same as a mapping edit: the link thread reads this list while it
+        runs, and a half-edited entry would go out on the wire.
+        """
+        w = self.out_widgets[i]
+        old = self.mixer.channels[i]
+        try:
+            lo = int(float(w["lo"].get()))
+            hi = int(float(w["hi"].get()))
+        except (TypeError, ValueError):
+            return                      # mid-typing; the box is not a number
+        lo = max(self.OUT_MIN_US, min(self.OUT_MAX_US, lo))
+        hi = max(self.OUT_MIN_US, min(self.OUT_MAX_US, hi))
+        if lo == old.out_min and hi == old.out_max:
+            return
+        self.mixer.channels[i] = dataclasses.replace(old, out_min=lo,
+                                                     out_max=hi)
+        self.cfg["channels"][i] = self.mixer.channels[i].to_dict()
+
+    def reset_outputs(self):
+        for i in range(crsf.NUM_CHANNELS):
+            self.out_widgets[i]["lo"].set(str(self.OUT_MIN_US))
+            self.out_widgets[i]["hi"].set(str(self.OUT_MAX_US))
+            self.on_output_changed(i)
+        self.log("info", "Every channel back to full travel.")
 
     # -------------------------------------------------------------- module
     def _build_module_tab(self, nb):
@@ -975,6 +1084,8 @@ class App(tk.Tk):
                 value=old.value,
                 steps=old.steps if raw_steps in ("", self.NO_INDEX)
                       else max(2, min(6, int(raw_steps))),
+                # Owned by the Outputs tab; this one must not reset them.
+                out_min=old.out_min, out_max=old.out_max,
                 reset_ch=self._reset_value(w["reset_ch"].get()),
                 # "none" here is the box being blanked for a source that has
                 # no latch, exactly as for index and steps - not a value.
@@ -1617,7 +1728,7 @@ class App(tk.Tk):
             # where it holds what was last actually seen. The GUI must not
             # compute here: two threads in compute() race on the latches and
             # can swallow an arm press at the moment transmission resumes.
-            values = list(self.mixer.last_values)
+            values = list(self.mixer.output_values)
         else:
             values = self.mixer.compute(states)
 
@@ -1626,6 +1737,12 @@ class App(tk.Tk):
             w["bar"]["value"] = max(0, min(1000, (v - crsf.CHANNEL_MIN) * 1000 //
                                            (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)))
             w["val"].config(text=fmt_channel(v))
+
+        for i, w in enumerate(self.out_widgets):
+            v = values[i]
+            w["bar"]["value"] = max(0, min(1000, (v - crsf.CHANNEL_MIN) * 1000 //
+                                           (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)))
+            w["sent"].config(text=f"{crsf.crsf_to_us(v):.0f} µs")
 
         # ---- throttle + arm
         thr_pct = self.mixer.throttle.value * 100.0
@@ -1921,6 +2038,8 @@ class App(tk.Tk):
             w["src"].set(ch.src)
             w["inv"].set(ch.inv)
             w["dev"].set(str(ch.dev))
+            self.out_widgets[i]["lo"].set(str(ch.out_min))
+            self.out_widgets[i]["hi"].set(str(ch.out_max))
             self._sync_row_widgets(i)
         t = self.cfg["throttle"]
         self.thr_mode.set(t["mode"])

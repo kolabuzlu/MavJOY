@@ -342,6 +342,39 @@ The F710's sticks self-centre, which is why throttle gets its own engine:
 
 ---
 
+## Outputs
+
+The **Outputs** tab sets what full travel is worth in microseconds, per
+channel — a handset's output limits, and the last thing applied before a
+frame leaves. Everything else in the app works in full travel; these are the
+numbers the flight controller actually sees.
+
+Full right aileron sends 2012 µs by default. Set CH1's **max** to 1900 and it
+sends 1900 instead, with the stick doing exactly what it did before.
+
+**Centre stays at 1500 and each half is scaled on its own.** Pulling max down
+shortens the throw one way without moving neutral. Scaling the whole range
+instead would drag neutral along with the endpoint, so trimming the top of an
+aileron throw would leave the model in a permanent turn — which is why a
+handset does not do it that way either.
+
+Both boxes clamp to 988–2012 µs. The **sent** column is live, so you can hold
+a stick over and read the number the receiver is being given. *Full travel on
+every channel* puts all sixteen back to 988/2012.
+
+Endpoints are per channel and independent of the mapping: change a channel's
+source or index and its endpoints stay as you set them.
+
+### Why the two values are kept apart
+
+The scaled value goes on the wire, but the **full travel** value is what the
+next frame reasons from — the resume hold, a channel holding its last value
+through a dropout, the arm check. Scaling in place would mean scaling an
+already scaled value, and a held channel would creep toward centre a few
+microseconds every frame: slow enough to look like drift rather than a bug.
+`selftest.py` runs 200 frames with the device unplugged and asserts the value
+has not moved.
+
 ## Module settings
 
 The **Module** tab is a full settings editor: everything the EdgeTX Lua
