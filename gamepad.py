@@ -386,11 +386,19 @@ class Mixer:
         self.channels = [ChannelMap.from_dict(c) for c in config["channels"]]
         self.throttle = ThrottleEngine(config["throttle"])
         self.deadzone = float(config.get("deadzone", 0.04))
+        # Per-axis overrides. Sticks wear unevenly, so a single value for the
+        # whole pad means deadening the good axes to tame the worst one.
+        self.axis_deadzone = {int(k): float(v)
+                              for k, v in (config.get("axis_deadzone") or {}).items()}
         self._toggles = {}
         self._cycles = {}
         self._prev_buttons = ()
         self._last_t = None
         self.last_values = [crsf.CHANNEL_MID] * crsf.NUM_CHANNELS
+
+    def deadzone_for(self, axis: int) -> float:
+        """The deadzone for one axis, falling back to the pad-wide value."""
+        return self.axis_deadzone.get(axis, self.deadzone)
 
     def reset(self):
         """Called before a link is started: everything back to a safe state."""
@@ -451,7 +459,7 @@ class Mixer:
 
         if src == "axis":
             raw = st.axes[ch.idx] if ch.idx < len(st.axes) else 0.0
-            raw = _apply_deadzone(raw, self.deadzone)
+            raw = _apply_deadzone(raw, self.deadzone_for(ch.idx))
             return crsf.norm_to_crsf(-raw if ch.inv else raw)
 
         if src == "button":

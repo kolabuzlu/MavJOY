@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "sync_byte": 0xC8,
     "gamepad_index": 0,
     "deadzone": 0.05,
+    "axis_deadzone": {},  # per-axis overrides, keyed by axis number
     "throttle": {
         "mode": "ramp",
         "axis": 5,            # right trigger = throttle up

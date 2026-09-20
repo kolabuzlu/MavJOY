@@ -68,6 +68,7 @@ class App(tk.Tk):
         self.bind("<Escape>", lambda _e: self.stop_link(reason="Esc pressed"))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        self._maximize()
         self.refresh_ports()
         self.after(400, self.refresh_gamepads)   # give the pad thread time to scan
         self.after(REFRESH_MS, self._tick)
@@ -79,6 +80,16 @@ class App(tk.Tk):
         self.log("info", "Ready. Fit the antenna and power the module before starting a link.")
 
     # =================================================================== UI
+    def _maximize(self):
+        """Open filling the screen. Tk spells this differently per platform."""
+        try:
+            self.state("zoomed")                    # Windows, macOS
+        except tk.TclError:
+            try:
+                self.attributes("-zoomed", True)    # most Linux window managers
+            except tk.TclError:
+                pass                                # leave it at the set geometry
+
     def _build_menu(self):
         menubar = tk.Menu(self)
         filemenu = tk.Menu(menubar, tearoff=0)
@@ -386,57 +397,131 @@ class App(tk.Tk):
         self.thr_dz_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
         self.thr_dz_lbl.grid(row=6, column=3, sticky="w")
 
+        # Stick deadzone lives on the Inputs tab now, per axis, next to the
+        # live values it affects. A second slider here would appear to do
+        # nothing once any axis had its own value.
         ttk.Label(frm, text="Stick deadzone", width=14).grid(row=7, column=0,
                                                              sticky="w", pady=3)
-        self.stick_dz = tk.DoubleVar(value=self.cfg.get("deadzone", 0.05))
-        ttk.Scale(frm, from_=0.0, to=0.3, variable=self.stick_dz, length=200,
-                  command=lambda _v: self.on_throttle_changed()
-                  ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(0, 8))
-        self.stick_dz_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
-        self.stick_dz_lbl.grid(row=7, column=3, sticky="w")
+        ttk.Label(frm, foreground=self.pal["muted"],
+                  text="set per axis on the Inputs tab").grid(
+            row=7, column=1, columnspan=3, sticky="w")
 
         ttk.Label(tab, text="A link will not start unless throttle reads 0 %.",
                   foreground=self.pal["muted"]).pack(anchor="w", padx=12, pady=8)
         self.on_throttle_changed()
 
     # -------------------------------------------------------------- inputs
+    MAX_AXES = 10
+    MAX_BUTTONS = 20
+
     def _build_inputs_tab(self, nb):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Inputs")
 
-        ttk.Label(tab, text="Live values straight from the gamepad \u2014 use this to "
+        ttk.Label(tab, text="Live values straight from the gamepad — use this to "
                             "find the axis and button numbers for the mapping.",
                   foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 6))
 
         self.axis_frame = ttk.LabelFrame(tab, text="Axes")
         self.axis_frame.pack(fill="x", padx=10, pady=4)
+
+        grid = ttk.Frame(self.axis_frame)
+        grid.pack(fill="x", padx=8, pady=6)
+        grid.columnconfigure(1, weight=1)
+        for col, title in enumerate(("", "live", "raw", "deadzone", "sent")):
+            ttk.Label(grid, text=title, foreground=self.pal["muted"]).grid(
+                row=0, column=col, sticky="w", padx=(0, 8))
+        ttk.Separator(grid, orient="horizontal").grid(
+            row=1, column=0, columnspan=5, sticky="ew", pady=(0, 4))
+
         self.axis_widgets = []
-        for i in range(10):
-            row = ttk.Frame(self.axis_frame)
-            row.pack(fill="x", padx=6, pady=1)
-            lbl = ttk.Label(row, text=f"axis {i}", width=8)
-            lbl.pack(side="left")
-            bar = ttk.Progressbar(row, length=260, maximum=2000)
-            bar.pack(side="left")
-            val = ttk.Label(row, text="\u2014", width=10)
-            val.pack(side="left", padx=6)
-            row.pack_forget()
-            self.axis_widgets.append({"row": row, "bar": bar, "val": val})
+        for i in range(self.MAX_AXES):
+            row = i + 2
+            cells = []
+            cells.append(ttk.Label(grid, text=f"axis {i}", width=8))
+            bar = ttk.Progressbar(grid, maximum=2000)
+            cells.append(bar)
+            val = ttk.Label(grid, text="—", width=8, anchor="e")
+            cells.append(val)
+
+            dz = tk.StringVar(value=f"{self.mixer.deadzone_for(i):.2f}")
+            spin = ttk.Spinbox(grid, from_=0.0, to=0.5, increment=0.01, width=6,
+                               format="%.2f", textvariable=dz,
+                               command=lambda n=i: self.on_deadzone_changed(n))
+            spin.bind("<Return>", lambda _e, n=i: self.on_deadzone_changed(n))
+            spin.bind("<FocusOut>", lambda _e, n=i: self.on_deadzone_changed(n))
+            cells.append(spin)
+
+            out = ttk.Label(grid, text="—", width=8, anchor="e")
+            cells.append(out)
+
+            for col, widget in enumerate(cells):
+                widget.grid(row=row, column=col, sticky="ew" if col == 1 else "w",
+                            padx=(0, 8), pady=1)
+                widget.grid_remove()
+            self.axis_widgets.append({"cells": cells, "bar": bar, "val": val,
+                                      "out": out, "dz": dz, "spin": spin})
+
+        foot = ttk.Frame(self.axis_frame)
+        foot.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(foot, foreground=self.pal["muted"], wraplength=820,
+                  justify="left",
+                  text="Deadzone ignores small movement around centre, for a stick "
+                       "that will not sit still. What is left is rescaled so full "
+                       "deflection still reaches the end of the channel. It applies "
+                       "to axis sources; the throttle engine has its own on the "
+                       "Throttle tab.").pack(anchor="w")
+        apply_row = ttk.Frame(foot)
+        apply_row.pack(anchor="w", pady=(6, 0))
+        ttk.Label(apply_row, text="Set every axis to").pack(side="left")
+        self.dz_all = tk.StringVar(value=f"{self.cfg.get('deadzone', 0.05):.2f}")
+        ttk.Spinbox(apply_row, from_=0.0, to=0.5, increment=0.01, width=6,
+                    format="%.2f", textvariable=self.dz_all).pack(side="left", padx=6)
+        ttk.Button(apply_row, text="Apply to all",
+                   command=self.apply_deadzone_to_all).pack(side="left")
 
         self.btn_frame = ttk.LabelFrame(tab, text="Buttons")
         self.btn_frame.pack(fill="x", padx=10, pady=8)
         self.btn_widgets = []
-        grid = ttk.Frame(self.btn_frame)
-        grid.pack(padx=6, pady=6)
-        for i in range(20):
-            lbl = tk.Label(grid, text=str(i), width=3, relief="ridge",
+        bgrid = ttk.Frame(self.btn_frame)
+        bgrid.pack(padx=6, pady=6)
+        for i in range(self.MAX_BUTTONS):
+            lbl = tk.Label(bgrid, text=str(i), width=3, relief="ridge",
                            bg=self.pal["off"], fg=self.pal["text"], padx=2, pady=2)
             lbl.grid(row=i // 10, column=i % 10, padx=2, pady=2)
             lbl.grid_remove()
             self.btn_widgets.append(lbl)
 
-        self.hat_lbl = ttk.Label(tab, text="hats: \u2014")
+        self.hat_lbl = ttk.Label(tab, text="hats: —")
         self.hat_lbl.pack(anchor="w", padx=12, pady=4)
+
+    def on_deadzone_changed(self, n):
+        """Per-axis deadzone. Sticks wear unevenly, so one value for the whole
+        pad means over-deadening the good axes to tame the worst one."""
+        w = self.axis_widgets[n]
+        try:
+            value = float(w["dz"].get())
+        except (tk.TclError, ValueError):
+            w["dz"].set(f"{self.mixer.deadzone_for(n):.2f}")
+            return
+        value = max(0.0, min(0.5, value))
+        self.mixer.axis_deadzone[n] = value
+        self.cfg.setdefault("axis_deadzone", {})[str(n)] = round(value, 3)
+        w["dz"].set(f"{value:.2f}")
+
+    def apply_deadzone_to_all(self):
+        try:
+            value = max(0.0, min(0.5, float(self.dz_all.get())))
+        except (tk.TclError, ValueError):
+            return
+        self.cfg["deadzone"] = round(value, 3)
+        self.mixer.deadzone = value
+        for n, w in enumerate(self.axis_widgets):
+            self.mixer.axis_deadzone[n] = value
+            self.cfg.setdefault("axis_deadzone", {})[str(n)] = round(value, 3)
+            w["dz"].set(f"{value:.2f}")
+        self.dz_all.set(f"{value:.2f}")
+        self.log("info", f"Deadzone set to {value:.2f} on every axis.")
 
     # ----------------------------------------------------------- telemetry
     def _build_telemetry_tab(self, nb):
@@ -582,7 +667,6 @@ class App(tk.Tk):
             t["cut_button"] = int(self.thr_cut.get())
             t["ramp_rate"] = round(float(self.thr_rate.get()), 2)
             t["deadzone"] = round(float(self.thr_dz.get()), 3)
-            self.cfg["deadzone"] = round(float(self.stick_dz.get()), 3)
         except (tk.TclError, ValueError):
             return
         self.mixer.deadzone = self.cfg["deadzone"]
@@ -590,7 +674,6 @@ class App(tk.Tk):
         self.thr_rate_lbl.config(text=f"{t['ramp_rate']:.2f} (idle\u2192full in "
                                       f"{1.0 / max(t['ramp_rate'], 0.01):.1f}s)")
         self.thr_dz_lbl.config(text=f"{t['deadzone']:.2f}")
-        self.stick_dz_lbl.config(text=f"{self.cfg['deadzone']:.2f}")
 
     # ---------------------------------------------------------------- link
     def start_link(self):
@@ -1102,12 +1185,16 @@ class App(tk.Tk):
     def _update_inputs(self, state):
         for i, w in enumerate(self.axis_widgets):
             if i < len(state.axes):
-                w["row"].pack(fill="x", padx=6, pady=1)
+                for cell in w["cells"]:
+                    cell.grid()
                 v = state.axes[i]
                 w["bar"]["value"] = (v + 1.0) * 1000
                 w["val"].config(text=f"{v:+.3f}")
+                out = gp._apply_deadzone(v, self.mixer.deadzone_for(i))
+                w["out"].config(text=f"{out:+.3f}")
             else:
-                w["row"].pack_forget()
+                for cell in w["cells"]:
+                    cell.grid_remove()
 
         for i, lbl in enumerate(self.btn_widgets):
             if i < len(state.buttons):
@@ -1219,8 +1306,10 @@ class App(tk.Tk):
         self.thr_cut.set(t["cut_button"])
         self.thr_rate.set(t["ramp_rate"])
         self.thr_dz.set(t["deadzone"])
-        self.stick_dz.set(self.cfg["deadzone"])
         self.baud_var.set(str(self.cfg["baud"]))
+        for n, w in enumerate(self.axis_widgets):
+            w["dz"].set(f"{self.mixer.deadzone_for(n):.2f}")
+        self.dz_all.set(f"{self.cfg.get('deadzone', 0.05):.2f}")
         self.rate_var.set(self.cfg["rate_hz"])
         self.rate_auto.set(bool(self.cfg.get("rate_auto", True)))
         self._on_rate_auto()

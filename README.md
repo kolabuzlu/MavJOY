@@ -127,6 +127,22 @@ Channel sources: `axis`, `button` (momentary), `toggle` (latching — use for
 arm), `cycle` (steps through 2–6 positions, for flight modes), `hat_x`/`hat_y`
 (d-pad), `fixed`, `throttle`, `none`.
 
+### Deadzone
+
+The **Inputs** tab carries a deadzone per axis, next to the live values it
+affects. Each row shows the raw reading and what the mapper will actually
+send, so you can wind the number up until a resting stick reads zero and no
+further.
+
+Deadzone is set per axis rather than for the pad as a whole because sticks
+wear unevenly — one worn axis would otherwise force you to deaden all of
+them. **Apply to all** sets every axis at once when that is what you want.
+
+Whatever is left outside the deadzone is rescaled, so full deflection still
+reaches the end of the channel travel. The throttle engine keeps its own
+deadzone on the Throttle tab, since it reads triggers rather than a
+self-centring stick.
+
 ### Throttle
 
 The F710's sticks self-centre, which is why throttle gets its own engine:
