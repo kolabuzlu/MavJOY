@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from collections import deque
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 SOURCE = "mavjoyback.png"
 ICON_PNG = "mavjoy_icon.png"
@@ -29,8 +29,40 @@ ICON_ICO = "mavjoy.ico"
 # the screen, which is artwork and must stay.
 BACKGROUND_MAX = 90
 
-ICO_SIZES = [(16, 16), (24, 24), (32, 32), (48, 48),
-             (64, 64), (128, 128), (256, 256)]
+ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
+
+# Sizes the window itself uses, of the WHOLE logo - monitor, wordmark and
+# black background, exactly as drawn. The icon is the monitor alone because
+# a wordmark is illegible at 32 px, but inside the app the full lockup is
+# what belongs there.
+#
+# They are made here because Tk can only resample by whole-number decimation
+# - it takes every Nth pixel and throws the rest away. On the wordmark,
+# whose strokes are about twenty pixels wide in a source reduced twentyfold,
+# that means each stroke either survives whole or vanishes. It is what made
+# this look soft in the window while the same artwork was sharp on the
+# desktop, where Windows scales the .ico properly.
+LOGO_SIZES = [48, 64, 80, 96, 128]
+LOGO_PATTERN = "mavjoy_lockup_%d.png"
+
+
+def scaled(art, size):
+    """One size, resampled well and then given its edges back.
+
+    Reducing by this much is a low-pass filter however good the filter is,
+    and the result reads as soft next to artwork drawn at the size it is
+    shown. An unsharp pass afterwards gives back the edge contrast the
+    reduction took out. Small sizes lose proportionally more, so they get
+    proportionally more of it back.
+
+    The radius is kept tight. A wider one sharpens harder but rings: white
+    against the red of the joystick overshoots into cyan, and a halo shows
+    round the base - which at icon sizes reads as grubby rather than crisp.
+    """
+    out = art.resize((size, size), Image.Resampling.LANCZOS)
+    percent = 140 if size <= 32 else (115 if size <= 64 else 100)
+    return out.filter(ImageFilter.UnsharpMask(radius=0.6, percent=percent,
+                                              threshold=0))
 
 
 def content_bands(im, threshold=30):
@@ -109,16 +141,29 @@ def main():
 
     print(f"background cleared: {key_background(art)} px")
 
-    # Square, so nothing is stretched when it is scaled down, with a little
-    # room around it - an icon pressed against its own edges looks wrong at
-    # every size.
-    side = int(max(art.size) * 1.06)
+    # Square, so nothing is stretched when it is scaled down, and only just
+    # bigger than the artwork. Padding is wasted at icon sizes:
+    # every pixel spent on empty margin is one the monitor does not get, and
+    # at 32 px there are not many to spare.
+    side = int(max(art.size) * 1.02)
     canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     canvas.paste(art, ((side - art.width) // 2, (side - art.height) // 2))
     canvas.save(ICON_PNG)
-    canvas.save(ICON_ICO, format="ICO", sizes=ICO_SIZES)
+
+    # Built one at a time rather than left to the ICO writer, which resamples
+    # well but cannot sharpen afterwards.
+    frames = [scaled(canvas, n) for n in ICO_SIZES]
+    frames[-1].save(ICON_ICO, format="ICO",
+                    sizes=[(n, n) for n in ICO_SIZES],
+                    append_images=frames[:-1])
     print(f"wrote {ICON_PNG} at {canvas.size} and {ICON_ICO} at "
           f"{len(ICO_SIZES)} sizes")
+
+    # The window's copies come from the source as drawn, black background
+    # and all - not from the cropped artwork above.
+    for n in LOGO_SIZES:
+        scaled(im, n).convert("RGB").save(LOGO_PATTERN % n)
+    print("wrote " + ", ".join(LOGO_PATTERN % n for n in LOGO_SIZES))
     return 0
 
 

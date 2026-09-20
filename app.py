@@ -38,8 +38,31 @@ def fmt_channel(value: int) -> str:
     return f"{value:4d}  ({crsf.crsf_to_us(value):.0f}\u00b5s)"
 
 
+def claim_taskbar_identity():
+    """Tell Windows this window is its own application.
+
+    Run from source the process is python.exe, so Windows groups the window
+    under Python's taskbar button and shows Python's icon on it - the window
+    icon is ignored for grouping. An explicit AppUserModelID makes this a
+    separate application, and the taskbar then uses this window's own icon.
+
+    The frozen build has its own executable and would be separate anyway,
+    but setting it there too keeps the two the same and costs nothing.
+    Anything that goes wrong here is cosmetic, so it fails quietly.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "MavJOY.MavJOY.1")
+    except Exception:
+        pass
+
+
 class App(tk.Tk):
     def __init__(self, simulate=False):
+        claim_taskbar_identity()        # before the window exists
         super().__init__()
         self.title("MavJOY")
         self.geometry("1000x760")
@@ -142,10 +165,17 @@ class App(tk.Tk):
         menubar.add_cascade(label="Help", menu=helpmenu)
         self.config(menu=menubar)
 
-    # The monitor on its own, keyed onto transparency - see make_icon.py.
-    # The full lockup carries the wordmark and a black background, neither
-    # of which survives being shrunk to the height of two rows of controls.
-    LOGO_FILE = "mavjoy_icon.png"
+    # The whole logo as drawn - monitor, wordmark, black background - in
+    # ready-made sizes from make_icon.py, largest first. The icon is the
+    # monitor alone because a wordmark is illegible at 32 px; in here there
+    # is room for the lockup and the lockup is what belongs.
+    #
+    # Ready-made because Tk can only shrink by whole-number decimation, and
+    # on the wordmark that means each stroke either survives whole or
+    # vanishes. Nothing is scaled at runtime.
+    LOGO_SIZES = (128, 96, 80, 64, 48)
+    LOGO_PATTERN = "mavjoy_lockup_%d.png"
+    LOGO_FILE = "mavjoy_icon.png"          # full size, for the window icon
     LOGO_MARGIN = 3         # breathing room above and below
     LOGO_MIN = 24           # below this it is not worth drawing
 
@@ -159,7 +189,9 @@ class App(tk.Tk):
         failing to start over, so both are allowed to fail quietly.
         """
         try:
-            self.iconbitmap(configmod.asset_path(self.ICON_FILE))
+            # default= applies it to the application rather than to this one
+            # window, which is what the taskbar and any later dialog read.
+            self.iconbitmap(default=configmod.asset_path(self.ICON_FILE))
             return
         except Exception:
             pass
@@ -171,22 +203,21 @@ class App(tk.Tk):
             pass
 
     def _load_logo(self, target_px):
-        """The logo, scaled to about target_px tall, or None if it is absent.
+        """The largest ready-made logo that fits, at its own size.
 
-        Tk scales by whole-number factors only, so the result lands near the
-        target rather than on it. A missing or unreadable file is not an
-        error: this is decoration, and the app has to start without it.
+        No scaling: the sizes exist precisely so none has to happen here.
+        A missing or unreadable file is not an error - this is decoration,
+        and the app has to start without it.
         """
-        path = configmod.asset_path(self.LOGO_FILE)
-        try:
-            img = tk.PhotoImage(file=path)
-        except Exception:
-            return None
-        # Round the factor UP, so the result is never taller than asked
-        # for: rounding down overshoots, which is exactly the pixel or two
-        # that makes the panel grow.
-        factor = -(-img.height() // max(1, target_px))
-        return img.subsample(factor, factor) if factor > 1 else img
+        for size in self.LOGO_SIZES:
+            if size > target_px:
+                continue
+            try:
+                return tk.PhotoImage(
+                    file=configmod.asset_path(self.LOGO_PATTERN % size))
+            except Exception:
+                continue
+        return None
 
     def _place_logo(self, panel, rows):
         """Put the logo in the gap the controls and the buttons leave.
@@ -211,12 +242,12 @@ class App(tk.Tk):
         self._logo_img = self._load_logo(available)
         if self._logo_img is None:
             return
-        # Transparent, so it is given the panel's own colour to sit on and
-        # composites into it cleanly - in either theme, rather than the
-        # black tile the full lockup left behind.
-        tk.Label(panel, image=self._logo_img, bg=self.pal["panel"],
-                 borderwidth=0, highlightthickness=0).pack(
-            side="right", expand=True)
+
+        # The logo carries its own black background, so the label is told to
+        # match it rather than leaving the panel colour framing a black
+        # square.
+        tk.Label(panel, image=self._logo_img, bg="#000000", borderwidth=0,
+                 highlightthickness=0).pack(side="right", expand=True)
 
     def _build_top(self):
         top = ttk.LabelFrame(self, text="Link")
