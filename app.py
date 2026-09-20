@@ -51,6 +51,7 @@ class App(tk.Tk):
         self._fields = {}                   # index -> ParamField from the module
         self._field_vars = {}               # index -> the tk var editing it
         self._cmd_index = None              # command currently running
+        self._telem_last = ""               # last telemetry text drawn
         self._device = None                 # DEVICE_INFO from the module
 
         self.gamepad = (gp.SimGamepadThread() if simulate else gp.GamepadThread())
@@ -228,9 +229,13 @@ class App(tk.Tk):
         canvas.configure(yscrollcommand=bar.set)
         canvas.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
-        canvas.bind_all(
-            "<MouseWheel>",
-            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        # bind_all would capture the wheel for the whole application, so it
+        # is only hooked up while the pointer is actually over this canvas.
+        def _wheel(event):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
         self._render_fields()
 
     # ------------------------------------------------------------ channels
@@ -297,9 +302,11 @@ class App(tk.Tk):
                                   command=lambda n=i: self.on_channel_changed(n)),
                   3, sticky="")
 
-            steps = tk.IntVar(value=chcfg.steps)
-            place(ttk.Spinbox(grid, from_=2, to=6, width=3, textvariable=steps,
-                              command=lambda n=i: self.on_channel_changed(n)), 4)
+            steps = tk.StringVar(value=str(chcfg.steps))
+            steps_spin = ttk.Spinbox(grid, from_=2, to=6, width=4,
+                                     textvariable=steps,
+                                     command=lambda n=i: self.on_channel_changed(n))
+            place(steps_spin, 4)
 
             bar = ttk.Progressbar(grid, maximum=1000)
             place(bar, 5, sticky="ew")
@@ -312,8 +319,8 @@ class App(tk.Tk):
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
-                                    "spin": spin})
-            self._sync_index_widget(i)
+                                    "spin": spin, "steps_spin": steps_spin})
+            self._sync_row_widgets(i)
 
         ttk.Label(tab, text="Mapping is one input to one channel. No mixing, no expo, "
                             "no curves — do all of that on the flight controller.",
@@ -434,15 +441,19 @@ class App(tk.Tk):
     def _build_telemetry_tab(self, nb):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Telemetry")
-        self.telem_text = tk.Text(tab, height=24, wrap="none",
+        wrap = ttk.Frame(tab)
+        wrap.pack(fill="both", expand=True, padx=10, pady=10)
+        self.telem_text = tk.Text(wrap, height=24, wrap="none",
                                   font=("TkFixedFont", 10),
                                   background=self.pal["field"],
                                   foreground=self.pal["text"],
                                   insertbackground=self.pal["text"],
                                   selectbackground=self.pal["select_bg"],
                                   highlightthickness=0, borderwidth=0)
-        self.telem_text.pack(fill="both", expand=True, padx=10, pady=10)
-        self.telem_text.configure(state="disabled")
+        bar = ttk.Scrollbar(wrap, command=self.telem_text.yview)
+        self.telem_text.configure(yscrollcommand=bar.set, state="disabled")
+        bar.pack(side="right", fill="y")
+        self.telem_text.pack(side="left", fill="both", expand=True)
 
     # ----------------------------------------------------------------- log
     def _build_log_tab(self, nb):
@@ -521,18 +532,28 @@ class App(tk.Tk):
 
     NO_INDEX = "none"
 
-    def _sync_index_widget(self, n):
-        """Only some sources read a numbered input. For the rest the index
-        means nothing, so show none and lock the box rather than implying
-        that a 0 sitting there does something."""
+    def _sync_row_widgets(self, n):
+        """Show none and lock the boxes a source does not use, rather than
+        leaving a number sitting there implying it does something.
+
+        Index applies to sources that read a numbered input; steps only to
+        cycle, which is the one that walks through several positions."""
         w = self.ch_widgets[n]
         ch = self.mixer.channels[n]
+
         if ch.src in gp.INDEXED_SOURCES:
             w["spin"].config(state="normal")
             w["idx"].set(str(ch.idx))
         else:
             w["idx"].set(self.NO_INDEX)
             w["spin"].config(state="disabled")
+
+        if ch.src == "cycle":
+            w["steps_spin"].config(state="normal")
+            w["steps"].set(str(ch.steps))
+        else:
+            w["steps"].set(self.NO_INDEX)
+            w["steps_spin"].config(state="disabled")
 
     def on_channel_changed(self, n):
         w = self.ch_widgets[n]
@@ -542,10 +563,12 @@ class App(tk.Tk):
             raw = str(w["idx"].get()).strip().lower()
             ch.idx = 0 if raw in ("", self.NO_INDEX) else int(raw)
             ch.inv = bool(w["inv"].get())
-            ch.steps = int(w["steps"].get())
+            raw_steps = str(w["steps"].get()).strip().lower()
+            if raw_steps not in ("", self.NO_INDEX):
+                ch.steps = max(2, min(6, int(raw_steps)))
         except (tk.TclError, ValueError):
             return
-        self._sync_index_widget(n)
+        self._sync_row_widgets(n)
         self.cfg["channels"][n] = ch.to_dict()
         self.src_help.config(text=f"{ch.src}: {gp.SOURCE_HELP.get(ch.src, '')}")
 
@@ -1074,10 +1097,19 @@ class App(tk.Tk):
                   f"telemetry frames {stats.telem_frames}",
                   f"crc errors       {stats.crc_errors}",
                   f"write errors     {stats.write_errors}"]
-        self.telem_text.configure(state="normal")
-        self.telem_text.delete("1.0", "end")
-        self.telem_text.insert("1.0", "\n".join(lines))
-        self.telem_text.configure(state="disabled")
+        # This runs 20 times a second. Rewriting the widget every time threw
+        # the view straight back to the top, which made the tab impossible to
+        # scroll: redraw only when the text actually changed, and put the
+        # view back where the reader left it.
+        text = "\n".join(lines)
+        first, _last = self.telem_text.yview()
+        if text != self._telem_last:
+            self._telem_last = text
+            self.telem_text.configure(state="normal")
+            self.telem_text.delete("1.0", "end")
+            self.telem_text.insert("1.0", text)
+            self.telem_text.configure(state="disabled")
+            self.telem_text.yview_moveto(first)
 
     # ================================================================ misc
     def log(self, level, message):
@@ -1132,8 +1164,7 @@ class App(tk.Tk):
             ch = self.mixer.channels[i]
             w["src"].set(ch.src)
             w["inv"].set(ch.inv)
-            w["steps"].set(ch.steps)
-            self._sync_index_widget(i)
+            self._sync_row_widgets(i)
         t = self.cfg["throttle"]
         self.thr_mode.set(t["mode"])
         self.thr_axis.set(t["axis"])
