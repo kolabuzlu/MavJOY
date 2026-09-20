@@ -1,0 +1,23 @@
+# Written by the app next to config.py; holds one machine's serial port and
+# gamepad mapping, so it is not shared. Defaults live in config.py.
+config.json
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.venv/
+venv/
+env/
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# The stock ExpressLRS handset script (Copyright OpenTX, GPLv2). Kept here as
+# a protocol reference only - MavJOY never runs it. Not redistributed, so the
+# repo stays free of third-party copyleft. To ship it, move it to
+# third_party/ with its licence and drop this line.
+elrs.lua

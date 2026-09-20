@@ -1,0 +1,7 @@
+pyserial>=3.5
+
+# pygame has no wheels for Python 3.14 and won't build from source without a
+# toolchain; pygame-ce is the drop-in fork that does ship them. Same `import
+# pygame`, same joystick API. Installing both would collide, so pick one.
+pygame>=2.1.0; python_version < "3.13"
+pygame-ce>=2.5.0; python_version >= "3.13"
