@@ -181,31 +181,7 @@ def _run(wire):
           f"write errors {stats.write_errors}")
     assert 230 < stats.actual_rate < 270, "rate out of tolerance"
 
-    # ---- failsafe: kill the input and confirm the link stops transmitting
-    print("\nstopping gamepad thread to test the stale-input failsafe...")
-    pad.stop()
-    time.sleep(0.6)
-    before = lk.stats.frames_sent
-    while wire.read():          # drain anything still in flight
-        pass
-    time.sleep(1.0)
-    after = lk.stats.frames_sent
-    # Count bytes on the wire, not frames_sent. The failsafe contract is that
-    # the module hears *silence*, and a settings or status frame is invisible
-    # to frames_sent while still being a frame ExpressLRS heard.
-    leaked = b""
-    t_end = time.time() + 2.5
-    while time.time() < t_end:
-        leaked += wire.read()
-        time.sleep(0.01)
-    print(f"frames sent during the 1.0 s after input died: {after - before}")
-    print(f"bytes written to the port over the next 2.5 s: {len(leaked)}")
-    assert after == before, "link kept transmitting with dead input!"
-    assert not lk.transmitting
-    assert not leaked, (f"link wrote {len(leaked)} bytes during failsafe: "
-                        f"{leaked[:32].hex(' ')} - the module must hear silence")
-
-    # ---- telemetry path
+    # ---- telemetry path, while the link is still up
     ls = bytes([45, 50, 100, 8, 0, 6, 5, 40, 98, 3])
     body = bytes([crsf.FRAMETYPE_LINK_STATISTICS]) + ls
     frame = bytes([0xEA, len(body) + 1]) + body + bytes([crsf.crc8(body)])
@@ -215,11 +191,39 @@ def _run(wire):
     print("telemetry decoded:", telem.get("link"))
     assert telem.get("link", {}).get("up_lq") == 100
 
+    # ---- failsafe: killing the input must END the link, not pause it.
+    # Resuming would hand control back at whatever the sticks and switches
+    # read, pulling a model out of the failsafe it had already entered.
+    print("\nstopping gamepad thread to test the stale-input failsafe...")
+    before = lk.stats.frames_sent
+    pad.stop()
+    lk.join(timeout=3.0)
+    after = lk.stats.frames_sent
+    print(f"link thread still alive: {lk.is_alive()}")
+    assert not lk.is_alive(), "link kept running with dead input!"
+    assert not lk.transmitting
+    assert not lk.running, "the serial port was left open"
+
+    # Count bytes, not frames_sent: a settings or status frame is invisible
+    # to a frame counter while still being a frame ExpressLRS heard.
+    while wire.read():
+        pass
+    leaked = b""
+    t_end = time.time() + 2.0
+    while time.time() < t_end:
+        leaked += wire.read()
+        time.sleep(0.01)
+    print(f"frames sent after input died: {after - before}")
+    print(f"bytes written to the port over the next 2.0 s: {len(leaked)}")
+    assert not leaked, (f"link wrote {len(leaked)} bytes during failsafe: "
+                        f"{leaked[:32].hex(chr(32))} - must hear silence")
+
     lk.stop()
     lk.join(timeout=2)
     print("\nevents:")
     for lvl, m in events:
         print(f"   [{lvl}] {m}")
+
     print("\nALL CHECKS PASSED")
 
 

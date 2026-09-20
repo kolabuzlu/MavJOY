@@ -203,7 +203,6 @@ class CrsfLink(threading.Thread):
         self.telemetry = {}
         self.running = False
         self.transmitting = False   # True while we are actually sending frames
-        self._had_input = False     # have we ever had live input on this link
         self._parser = crsf.Parser()
         self._ser = None
 
@@ -364,12 +363,28 @@ class CrsfLink(threading.Thread):
         stale_slot, st = self._first_stale(states)
 
         if stale_slot is not None:
+            where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
+            reason = f"{where} disconnected" if not st.connected else \
+                     f"{where} data stale ({st.age() * 1000:.0f} ms)"
             if self.transmitting:
-                where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
-                reason = f"{where} disconnected" if not st.connected else \
-                         f"{where} data stale ({st.age() * 1000:.0f} ms)"
-                self.on_event("warn", f"Stopped transmitting: {reason}. "
-                                      f"Receiver will go to failsafe.")
+                # Losing input in flight ends the link; it does not
+                # pause it. By the time the device comes back the model
+                # is in its own failsafe - RTL, on ArduPilot - and
+                # resuming would hand control straight back at whatever
+                # the sticks and switches happen to read, pulling it out
+                # of that. A switch source reads the lever's real
+                # position, so clearing the latches cannot prevent it.
+                #
+                # Closing the port is what makes this behave like any
+                # other link loss: it drops DTR/RTS, the module's ESP
+                # reboots, RF goes away properly, and the model holds
+                # failsafe until the pilot re-engages deliberately.
+                self.transmitting = False
+                self.on_event("error",
+                              f"{reason}. Link closed - the model stays "
+                              f"in failsafe until you press Start again.")
+                self._stop_event.set()
+                return
             self.transmitting = False
             with self._lock:
                 self.stats.frames_skipped += 1
@@ -382,16 +397,6 @@ class CrsfLink(threading.Thread):
             return
 
         if not self.transmitting:
-            if self._had_input:
-                # Coming back after a dropout. Latches are software state
-                # that outlived the outage, so an arm toggle that was on
-                # would go straight back out armed the moment the device
-                # reappears. Clear them, exactly as starting a link does.
-                self.mixer.reset()
-                self.on_event("warn", "Input returned. Latches and throttle "
-                                      "were reset, so arming needs a fresh "
-                                      "action.")
-            self._had_input = True
             self.transmitting = True
             self.on_event("info", "Transmitting channel data")
 

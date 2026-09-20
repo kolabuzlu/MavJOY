@@ -160,12 +160,23 @@ throttle and the throttle engine reads the pad. Matched on identity, a
 device returns to the slot it left, and a slot whose device is absent stays
 empty rather than grabbing whatever is nearest.
 
-**A link that has dropped out resumes on its own when the device comes
-back, and the latches are reset when it does.** Toggles and cycle positions
-are software state that outlives the outage, so an arm toggle that was on
-would otherwise go straight back out armed the moment the plug went in.
-Arming after a dropout takes a fresh action, exactly as starting a link
-does.
+**Losing a device ends the link; it does not pause it.** By the time you
+plug it back in the model is already in its own failsafe — RTL, on
+ArduPilot — and resuming would hand control straight back at whatever the
+sticks and switches happen to read, pulling it out of that. Clearing the
+latches is not enough to prevent it, because a `switch` source reads the
+lever's real position and the lever has not moved.
+
+So an unplug is treated exactly like any other link loss. The port is
+closed, which drops DTR/RTS and reboots the module's ESP, so RF goes away
+properly rather than pausing — the same thing that happens when you press
+Stop. The model holds failsafe until you press **Start** again, which
+re-runs every precondition: throttle at idle, latches cleared, every
+required device reporting.
+
+The device itself is still picked up automatically, so replugging fills the
+slot back in without touching the refresh button. It is only the
+transmitting that waits for you.
 
 ### Arming
 
@@ -381,6 +392,8 @@ Other safety behaviour:
 
 - The gamepad is polled on its own thread, so a frozen GUI cannot affect
   control, and input older than 150 ms counts as dead.
+- Losing an input device ends the link and closes the port, so the model
+  stays in failsafe until you deliberately press Start again.
 - While input is stale the link writes **nothing at all** — not telemetry
   requests, not settings traffic. Any well-formed frame is a frame the
   module heard, so anything on the wire undermines the watchdog that is

@@ -1343,7 +1343,9 @@ class App(tk.Tk):
         # a link thread that died (port vanished, write error) must not leave
         # the UI stuck in "started"
         if self.link is not None and not self.link.is_alive():
-            self.stop_link(reason="link thread ended")
+            # The link ends itself when input is lost; it has already logged
+            # why, so do not paper over that with a second vaguer message.
+            self.stop_link()
 
         states = self.gamepad.states
         state = self.gamepad.state
