@@ -183,6 +183,23 @@ class GamepadThread(threading.Thread):
                 self._rescan.clear()
                 self._scan()
                 self._resolve_slots()
+                # Re-initialising the joystick subsystem makes SDL announce
+                # every device all over again. Those are echoes of the rescan
+                # we just did, not new hardware, and acting on them schedules
+                # another scan immediately - the thread then re-enumerates
+                # forever and starves everything else of the interpreter.
+                # Anything that genuinely arrived is already in the list just
+                # built, so the echoes are safe to drop.
+                pygame.event.clear(pygame.JOYDEVICEADDED)
+                pygame.event.clear(pygame.JOYDEVICEREMOVED)
+                self._rescan.clear()
+                # ...unless a device moved while we were looking, which the
+                # count catches without another full re-enumeration.
+                try:
+                    if pygame.joystick.get_count() != len(self.device_list):
+                        self._rescan.set()
+                except Exception:
+                    pass
 
             self._poll()
 
