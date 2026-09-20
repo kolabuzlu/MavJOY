@@ -23,6 +23,7 @@ import config as configmod
 import crsf
 import gamepad as gp
 import link as linkmod
+import theme
 
 REFRESH_MS = 50          # GUI refresh, 20 Hz
 BAR_LEN = 150
@@ -40,6 +41,7 @@ class App(tk.Tk):
         self.minsize(900, 700)
 
         self.cfg, warning = configmod.load()
+        self.pal = theme.apply(self, self.cfg.get("theme", theme.DEFAULT))
         self.simulate = simulate
         self.link = None
         self._events = queue.Queue(maxsize=500)
@@ -85,6 +87,15 @@ class App(tk.Tk):
         filemenu.add_command(label="Quit", command=self.on_close)
         menubar.add_cascade(label="File", menu=filemenu)
 
+        viewmenu = tk.Menu(menubar, tearoff=0)
+        self.theme_var = tk.StringVar(
+            value=self.cfg.get("theme", theme.DEFAULT))
+        for name in ("dark", "light"):
+            viewmenu.add_radiobutton(label=name.capitalize(), value=name,
+                                     variable=self.theme_var,
+                                     command=self.on_theme_changed)
+        menubar.add_cascade(label="View", menu=viewmenu)
+
         helpmenu = tk.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="About", command=self.show_about)
         menubar.add_cascade(label="Help", menu=helpmenu)
@@ -118,7 +129,7 @@ class App(tk.Tk):
         self.rate_auto = tk.BooleanVar(value=bool(self.cfg.get("rate_auto", True)))
         ttk.Checkbutton(row, text="Auto", variable=self.rate_auto,
                         command=self._on_rate_auto).pack(side="left")
-        self.rate_hint = ttk.Label(row, foreground="#777777",
+        self.rate_hint = ttk.Label(row, foreground=self.pal["muted"],
                                    text="(PC→module, not the RF rate)")
         self.rate_hint.pack(side="left", padx=(6, 0))
         self._rate_warned = None
@@ -148,12 +159,12 @@ class App(tk.Tk):
 
         self.link_lbl = tk.Label(status, text="LINK STOPPED", width=18,
                                  font=("TkDefaultFont", 13, "bold"),
-                                 bg="#555555", fg="white", padx=8, pady=8)
+                                 bg=self.pal["idle"], fg=self.pal["on_accent"], padx=8, pady=8)
         self.link_lbl.pack(side="left")
 
         self.arm_lbl = tk.Label(status, text="ARM: \u2014", width=14,
                                 font=("TkDefaultFont", 13, "bold"),
-                                bg="#555555", fg="white", padx=8, pady=8)
+                                bg=self.pal["idle"], fg=self.pal["on_accent"], padx=8, pady=8)
         self.arm_lbl.pack(side="left", padx=(8, 0))
 
         thr_frame = ttk.Frame(status)
@@ -198,7 +209,7 @@ class App(tk.Tk):
                         command=self._render_fields).pack(side="right", padx=8)
 
         self.module_info_lbl = ttk.Label(
-            tab, foreground="#777777",
+            tab, foreground=self.pal["muted"],
             text="Start the link, then read the settings from the module.")
         self.module_info_lbl.pack(anchor="w", padx=10, pady=(0, 6))
 
@@ -206,7 +217,8 @@ class App(tk.Tk):
         # same list the EdgeTX Lua script walks.
         wrap = ttk.Frame(tab)
         wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        canvas = tk.Canvas(wrap, highlightthickness=0, borderwidth=0)
+        canvas = tk.Canvas(wrap, highlightthickness=0, borderwidth=0,
+                           background=self.pal["panel"])
         bar = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
         self.module_body = ttk.Frame(canvas)
         self.module_body.bind(
@@ -251,7 +263,7 @@ class App(tk.Tk):
             combo.bind("<<ComboboxSelected>>",
                        lambda _e, n=i: self.on_channel_changed(n))
 
-            idx = tk.IntVar(value=chcfg.idx)
+            idx = tk.StringVar(value=str(chcfg.idx))
             spin = ttk.Spinbox(row, from_=0, to=31, width=4, textvariable=idx,
                                command=lambda n=i: self.on_channel_changed(n))
             spin.pack(side="left", padx=(6, 8))
@@ -272,15 +284,17 @@ class App(tk.Tk):
             val = ttk.Label(row, text="\u2014", width=16, anchor="w")
             val.pack(side="left", padx=6)
             ttk.Label(row, text=configmod.CHANNEL_HINTS[i], width=16,
-                      foreground="#777777").pack(side="left")
+                      foreground=self.pal["muted"]).pack(side="left")
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
-                                    "steps": steps, "bar": bar, "val": val})
+                                    "steps": steps, "bar": bar, "val": val,
+                                    "spin": spin})
+            self._sync_index_widget(i)
 
         ttk.Label(tab, text="Mapping is one input to one channel. No mixing, no expo, "
                             "no curves \u2014 do all of that on the flight controller.",
-                  foreground="#777777").pack(anchor="w", padx=8, pady=(10, 2))
-        self.src_help = ttk.Label(tab, text="", foreground="#555555")
+                  foreground=self.pal["muted"]).pack(anchor="w", padx=8, pady=(10, 2))
+        self.src_help = ttk.Label(tab, text="", foreground=self.pal["faint"])
         self.src_help.pack(anchor="w", padx=8)
 
     # ------------------------------------------------------------ throttle
@@ -300,7 +314,7 @@ class App(tk.Tk):
         mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.on_throttle_changed())
 
         self.thr_help = ttk.Label(frm, text="", wraplength=620, justify="left",
-                                  foreground="#555555")
+                                  foreground=self.pal["faint"])
         self.thr_help.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 14))
 
         def spin(label, key, row, lo, hi, hint=""):
@@ -311,7 +325,7 @@ class App(tk.Tk):
                              command=self.on_throttle_changed)
             sp.grid(row=row, column=1, sticky="w")
             sp.bind("<KeyRelease>", lambda _e: self.on_throttle_changed())
-            ttk.Label(frm, text=hint, foreground="#777777").grid(row=row, column=2,
+            ttk.Label(frm, text=hint, foreground=self.pal["muted"]).grid(row=row, column=2,
                                                                  sticky="w", padx=8)
             return var
 
@@ -328,7 +342,7 @@ class App(tk.Tk):
         ttk.Scale(frm, from_=0.1, to=2.0, variable=self.thr_rate, length=200,
                   command=lambda _v: self.on_throttle_changed()
                   ).grid(row=5, column=1, columnspan=2, sticky="w", padx=(0, 8))
-        self.thr_rate_lbl = ttk.Label(frm, text="", foreground="#777777")
+        self.thr_rate_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
         self.thr_rate_lbl.grid(row=5, column=3, sticky="w")
 
         ttk.Label(frm, text="Deadzone", width=14).grid(row=6, column=0, sticky="w",
@@ -337,7 +351,7 @@ class App(tk.Tk):
         ttk.Scale(frm, from_=0.0, to=0.3, variable=self.thr_dz, length=200,
                   command=lambda _v: self.on_throttle_changed()
                   ).grid(row=6, column=1, columnspan=2, sticky="w", padx=(0, 8))
-        self.thr_dz_lbl = ttk.Label(frm, text="", foreground="#777777")
+        self.thr_dz_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
         self.thr_dz_lbl.grid(row=6, column=3, sticky="w")
 
         ttk.Label(frm, text="Stick deadzone", width=14).grid(row=7, column=0,
@@ -346,11 +360,11 @@ class App(tk.Tk):
         ttk.Scale(frm, from_=0.0, to=0.3, variable=self.stick_dz, length=200,
                   command=lambda _v: self.on_throttle_changed()
                   ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(0, 8))
-        self.stick_dz_lbl = ttk.Label(frm, text="", foreground="#777777")
+        self.stick_dz_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
         self.stick_dz_lbl.grid(row=7, column=3, sticky="w")
 
         ttk.Label(tab, text="A link will not start unless throttle reads 0 %.",
-                  foreground="#777777").pack(anchor="w", padx=12, pady=8)
+                  foreground=self.pal["muted"]).pack(anchor="w", padx=12, pady=8)
         self.on_throttle_changed()
 
     # -------------------------------------------------------------- inputs
@@ -360,7 +374,7 @@ class App(tk.Tk):
 
         ttk.Label(tab, text="Live values straight from the gamepad \u2014 use this to "
                             "find the axis and button numbers for the mapping.",
-                  foreground="#777777").pack(anchor="w", padx=10, pady=(10, 6))
+                  foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 6))
 
         self.axis_frame = ttk.LabelFrame(tab, text="Axes")
         self.axis_frame.pack(fill="x", padx=10, pady=4)
@@ -384,7 +398,7 @@ class App(tk.Tk):
         grid.pack(padx=6, pady=6)
         for i in range(20):
             lbl = tk.Label(grid, text=str(i), width=3, relief="ridge",
-                           bg="#dddddd", padx=2, pady=2)
+                           bg=self.pal["off"], fg=self.pal["text"], padx=2, pady=2)
             lbl.grid(row=i // 10, column=i % 10, padx=2, pady=2)
             lbl.grid_remove()
             self.btn_widgets.append(lbl)
@@ -397,7 +411,12 @@ class App(tk.Tk):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Telemetry")
         self.telem_text = tk.Text(tab, height=24, wrap="none",
-                                  font=("TkFixedFont", 10))
+                                  font=("TkFixedFont", 10),
+                                  background=self.pal["field"],
+                                  foreground=self.pal["text"],
+                                  insertbackground=self.pal["text"],
+                                  selectbackground=self.pal["select_bg"],
+                                  highlightthickness=0, borderwidth=0)
         self.telem_text.pack(fill="both", expand=True, padx=10, pady=10)
         self.telem_text.configure(state="disabled")
 
@@ -408,14 +427,19 @@ class App(tk.Tk):
         wrap = ttk.Frame(tab)
         wrap.pack(fill="both", expand=True, padx=10, pady=10)
         self.log_text = tk.Text(wrap, height=20, wrap="word",
-                                font=("TkFixedFont", 10))
+                                font=("TkFixedFont", 10),
+                                background=self.pal["field"],
+                                foreground=self.pal["text"],
+                                insertbackground=self.pal["text"],
+                                selectbackground=self.pal["select_bg"],
+                                highlightthickness=0, borderwidth=0)
         sb = ttk.Scrollbar(wrap, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=sb.set, state="disabled")
         sb.pack(side="right", fill="y")
         self.log_text.pack(side="left", fill="both", expand=True)
-        self.log_text.tag_configure("error", foreground="#cc0000")
-        self.log_text.tag_configure("warn", foreground="#b36b00")
-        self.log_text.tag_configure("info", foreground="#333333")
+        self.log_text.tag_configure("error", foreground=self.pal["danger"])
+        self.log_text.tag_configure("warn", foreground=self.pal["warn"])
+        self.log_text.tag_configure("info", foreground=self.pal["text"])
 
     def _build_statusbar(self):
         self.status_var = tk.StringVar(value="")
@@ -471,16 +495,33 @@ class App(tk.Tk):
         self.cfg["gamepad_index"] = idx
         self.gamepad.select(idx)
 
+    NO_INDEX = "none"
+
+    def _sync_index_widget(self, n):
+        """Only some sources read a numbered input. For the rest the index
+        means nothing, so show none and lock the box rather than implying
+        that a 0 sitting there does something."""
+        w = self.ch_widgets[n]
+        ch = self.mixer.channels[n]
+        if ch.src in gp.INDEXED_SOURCES:
+            w["spin"].config(state="normal")
+            w["idx"].set(str(ch.idx))
+        else:
+            w["idx"].set(self.NO_INDEX)
+            w["spin"].config(state="disabled")
+
     def on_channel_changed(self, n):
         w = self.ch_widgets[n]
         ch = self.mixer.channels[n]
         try:
             ch.src = w["src"].get()
-            ch.idx = int(w["idx"].get())
+            raw = str(w["idx"].get()).strip().lower()
+            ch.idx = 0 if raw in ("", self.NO_INDEX) else int(raw)
             ch.inv = bool(w["inv"].get())
             ch.steps = int(w["steps"].get())
         except (tk.TclError, ValueError):
             return
+        self._sync_index_widget(n)
         self.cfg["channels"][n] = ch.to_dict()
         self.src_help.config(text=f"{ch.src}: {gp.SOURCE_HELP.get(ch.src, '')}")
 
@@ -555,6 +596,19 @@ class App(tk.Tk):
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.after(1500, self.read_module_settings)
+
+    def on_theme_changed(self):
+        """Tk cannot repaint existing widgets from a style change alone, so
+        the new theme is saved and applied on the next start."""
+        name = self.theme_var.get()
+        if name == self.cfg.get("theme"):
+            return
+        self.cfg["theme"] = name
+        configmod.save(self.cfg)
+        self.log("info", f"Theme set to {name}; it applies next time MavJOY starts.")
+        messagebox.showinfo(
+            "Theme",
+            f"Saved the {name} theme. Restart MavJOY to see it.")
 
     def _on_rate_auto(self):
         """Auto mode drives the spinbox, so stop it being edited by hand."""
@@ -668,7 +722,7 @@ class App(tk.Tk):
         self._field_vars = {}
         self._row = 0
         if not self._fields:
-            ttk.Label(self.module_body, foreground="#777777",
+            ttk.Label(self.module_body, foreground=self.pal["muted"],
                       text="Nothing read yet.").grid(row=0, column=0,
                                                      sticky="w", padx=12, pady=6)
             return
@@ -727,7 +781,7 @@ class App(tk.Tk):
                 row=row, column=1, sticky="w")
 
         if field.unit and field.type != crsf.PARAM_SELECT:
-            ttk.Label(body, text=field.unit, foreground="#777777").grid(
+            ttk.Label(body, text=field.unit, foreground=self.pal["muted"]).grid(
                 row=row, column=2, sticky="w", padx=6)
 
     # ------------------------------------------------------------ editing
@@ -914,17 +968,17 @@ class App(tk.Tk):
 
         armed = self.mixer.armed_channels()
         if armed:
-            self.arm_lbl.config(text=f"ARM CH{armed[0]}: ON", bg="#cc0000")
+            self.arm_lbl.config(text=f"ARM CH{armed[0]}: ON", bg=self.pal["danger"])
         else:
-            self.arm_lbl.config(text="ARM: off", bg="#2e7d32")
+            self.arm_lbl.config(text="ARM: off", bg=self.pal["ok"])
 
         # ---- link state
         if running and self.link.transmitting:
-            self.link_lbl.config(text="TRANSMITTING", bg="#2e7d32")
+            self.link_lbl.config(text="TRANSMITTING", bg=self.pal["ok"])
         elif running:
-            self.link_lbl.config(text="PORT OPEN / NO TX", bg="#b36b00")
+            self.link_lbl.config(text="PORT OPEN / NO TX", bg=self.pal["warn"])
         else:
-            self.link_lbl.config(text="LINK STOPPED", bg="#555555")
+            self.link_lbl.config(text="LINK STOPPED", bg=self.pal["idle"])
 
         if running:
             telem, stats = self.link.snapshot()
@@ -964,7 +1018,7 @@ class App(tk.Tk):
         for i, lbl in enumerate(self.btn_widgets):
             if i < len(state.buttons):
                 lbl.grid()
-                lbl.config(bg="#2e7d32" if state.buttons[i] else "#dddddd",
+                lbl.config(bg=self.pal["ok"] if state.buttons[i] else self.pal["off"],
                            fg="white" if state.buttons[i] else "black")
             else:
                 lbl.grid_remove()
@@ -1053,9 +1107,9 @@ class App(tk.Tk):
         for i, w in enumerate(self.ch_widgets):
             ch = self.mixer.channels[i]
             w["src"].set(ch.src)
-            w["idx"].set(ch.idx)
             w["inv"].set(ch.inv)
             w["steps"].set(ch.steps)
+            self._sync_index_widget(i)
         t = self.cfg["throttle"]
         self.thr_mode.set(t["mode"])
         self.thr_axis.set(t["axis"])

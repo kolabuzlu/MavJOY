@@ -74,7 +74,20 @@ anything more (never 3S or above).
 
 ---
 
-## Default mapping (F710 with the rear switch in **X**)
+## Mapping
+
+**Nothing is mapped out of the box.** Every channel starts at source
+`none`, index `none`, and you build the map yourself in the **Channels**
+tab. Gamepads differ enough that a guessed default could put arm or
+throttle on the wrong control, which is not a mistake worth risking on a
+1 W transmitter.
+
+The index only applies to sources that read a numbered input — `axis`,
+`button`, `toggle`, `cycle`, `hat_x`, `hat_y`. For `none`, `throttle` and
+`fixed` it reads `none` and the box is locked, rather than showing a `0`
+that does nothing.
+
+A sane starting point for an F710 with the rear switch in **X**:
 
 | CH | Source | F710 control |
 |----|--------|--------------|
@@ -101,8 +114,8 @@ above puts the triggers on 2 and 5. Run `python inputs.py` to confirm.
 
 Use **X mode**, not D. In D mode the two triggers share one axis, which makes
 a ratcheting throttle impossible. The **Inputs** tab shows live axis and button
-numbers, so you can confirm what your pad actually reports and fix the mapping
-if it differs.
+numbers, so you can confirm what your pad actually reports and build the
+mapping to match.
 
 Channel sources: `axis`, `button` (momentary), `toggle` (latching — use for
 arm), `cycle` (steps through 2–6 positions, for flight modes), `hat_x`/`hat_y`
@@ -154,6 +167,17 @@ and has to be started again — the app says so before running them.
 ExpressLRS refuses settings it considers invalid for the current
 configuration rather than reporting an error, so the app always shows what
 the module says it is on, not what was asked for.
+
+## Appearance
+
+MavJOY starts dark. **View > Light** switches to the system look; the choice
+is saved and applied on the next start, because Tk cannot repaint widgets
+that already exist from a style change alone.
+
+Colours live in `theme.py` as named roles — `panel`, `field`, `muted`,
+`accent`, `ok`, `warn`, `danger` — rather than being spelled out at each
+widget, so a new theme is one more dict. The channel and throttle bars use
+`accent`.
 
 ## Two different rates
 

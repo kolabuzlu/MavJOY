@@ -124,6 +124,13 @@ def main():
 def _run(wire):
     cfg = configmod.default_config()
     cfg["throttle"]["mode"] = "ramp"
+    # The shipped default maps nothing at all, so build the map this test
+    # needs here rather than leaning on whatever the defaults happen to be.
+    cfg["channels"][0] = {"src": "axis", "idx": 3, "inv": False}
+    cfg["channels"][1] = {"src": "axis", "idx": 4, "inv": False}
+    cfg["channels"][2] = {"src": "throttle", "idx": 0, "inv": False}
+    cfg["channels"][3] = {"src": "axis", "idx": 0, "inv": False}
+    cfg["channels"][4] = {"src": "toggle", "idx": 7, "inv": False}
     mixer = gp.Mixer(cfg)
     mixer.reset()
 

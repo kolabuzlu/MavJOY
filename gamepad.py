@@ -259,6 +259,10 @@ class SimGamepadThread(threading.Thread):
 
 SOURCES = ("none", "axis", "throttle", "button", "toggle", "cycle", "hat_x", "hat_y", "fixed")
 
+# Sources that read a numbered input. The rest ignore the index: none
+# sends centre, throttle comes from its own engine, fixed uses value.
+INDEXED_SOURCES = ("axis", "button", "toggle", "cycle", "hat_x", "hat_y")
+
 SOURCE_HELP = {
     "none": "sends centre (992)",
     "axis": "analog axis, -1..+1 -> 172..1811",

@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     "port": "",
     "baud": 400000,
     "rate_hz": 250,
+    "theme": "dark",
     "rate_auto": True,    # follow the rate the module asks for in its sync frames
     "sync_byte": 0xC8,
     "gamepad_index": 0,
@@ -53,22 +54,26 @@ DEFAULT_CONFIG = {
         "reverse": True,
     },
     "channels": [
-        {"src": "axis", "idx": 3, "inv": False},            # 1  roll / aileron
-        {"src": "axis", "idx": 4, "inv": False},            # 2  pitch / elevator
-        {"src": "throttle", "idx": 0, "inv": False},        # 3  throttle
-        {"src": "axis", "idx": 0, "inv": False},            # 4  yaw / rudder
-        {"src": "toggle", "idx": 7, "inv": False},          # 5  ARM (Start)
-        {"src": "cycle", "idx": 3, "inv": False, "steps": 3},  # 6  flight mode (Y)
-        {"src": "button", "idx": 5, "inv": False},          # 7  momentary (RB)
-        {"src": "none", "idx": 0, "inv": False},            # 8
-        {"src": "none", "idx": 0, "inv": False},            # 9
-        {"src": "none", "idx": 0, "inv": False},            # 10
-        {"src": "none", "idx": 0, "inv": False},            # 11
-        {"src": "none", "idx": 0, "inv": False},            # 12
-        {"src": "none", "idx": 0, "inv": False},            # 13
-        {"src": "none", "idx": 0, "inv": False},            # 14
-        {"src": "none", "idx": 0, "inv": False},            # 15
-        {"src": "none", "idx": 0, "inv": False},            # 16
+        # Nothing is mapped by default. Gamepads differ, and a map that
+        # guessed wrong could put arm or throttle on the wrong control,
+        # so every channel starts at none and you build it in the
+        # Channels tab. The hints below say what usually goes where.
+        {"src": "none", "idx": 0, "inv": False},   # 1
+        {"src": "none", "idx": 0, "inv": False},   # 2
+        {"src": "none", "idx": 0, "inv": False},   # 3
+        {"src": "none", "idx": 0, "inv": False},   # 4
+        {"src": "none", "idx": 0, "inv": False},   # 5
+        {"src": "none", "idx": 0, "inv": False},   # 6
+        {"src": "none", "idx": 0, "inv": False},   # 7
+        {"src": "none", "idx": 0, "inv": False},   # 8
+        {"src": "none", "idx": 0, "inv": False},   # 9
+        {"src": "none", "idx": 0, "inv": False},   # 10
+        {"src": "none", "idx": 0, "inv": False},   # 11
+        {"src": "none", "idx": 0, "inv": False},   # 12
+        {"src": "none", "idx": 0, "inv": False},   # 13
+        {"src": "none", "idx": 0, "inv": False},   # 14
+        {"src": "none", "idx": 0, "inv": False},   # 15
+        {"src": "none", "idx": 0, "inv": False},   # 16
     ],
 }
 
