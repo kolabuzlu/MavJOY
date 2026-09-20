@@ -512,6 +512,20 @@ Other safety behaviour:
 - Losing an input device stops the pulses and nothing more. The link stays
   up, the receiver failsafes, and transmission resumes by itself when the
   input returns — no prompt, no button.
+- **Recovery does not hand control back on its own.** When frames start
+  flowing again — after an input dropout, or after the RF link returns —
+  every switch channel is frozen at the value the model last actually
+  received, and stays there until its own input moves. Anything moved
+  during the outage never reached the model, so letting it take effect the
+  instant the link returns would take the model out of the failsafe it is
+  holding. The status bar names the held channels and the LINK banner reads
+  `HOLDING n CH` in amber.
+- **CH1–4 are never held.** Roll, pitch, throttle and yaw follow the sticks
+  the moment the link is back. A pilot who has just recovered a model needs
+  the controls to answer at once, and a frozen elevator or a throttle stuck
+  where it was is a worse emergency than the one the hold prevents. It is
+  the switches — flight mode above all — that must not jump, and those are
+  held.
 - While input is stale the link writes **nothing at all** — not telemetry
   requests, not settings traffic. Any well-formed frame is a frame the
   module heard, so anything on the wire undermines the watchdog that is

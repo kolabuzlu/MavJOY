@@ -798,6 +798,14 @@ class Mixer:
     # nudge does.
     RESUME_RELEASE = 32
 
+    # The primary flight controls are never frozen. A pilot who has just got
+    # the link back needs the sticks to answer at once, and a held elevator
+    # or a throttle stuck where it was is its own emergency - worse than the
+    # thing the hold exists to prevent. What must not jump is the switches:
+    # a flight mode moved during the outage is what would take the model out
+    # of the failsafe it is sitting in, and that is the whole point of this.
+    HOLD_EXEMPT = (1, 2, 3, 4)      # roll, pitch, throttle, yaw
+
     def hold_on_resume(self, values=None):
         """Freeze every channel at the value the model last actually had.
 
@@ -809,7 +817,8 @@ class Mixer:
 
         Each channel stays frozen until its own input moves again. That move
         is the pilot deliberately taking the channel back, so it is the only
-        thing that should hand control over.
+        thing that should hand control over. CH1-4 are never frozen at all;
+        see HOLD_EXEMPT.
 
         `values` is what the model last actually received. It defaults to the
         last values computed, which is right when the input itself went away:
@@ -819,7 +828,8 @@ class Mixer:
         link was still up.
         """
         src = self.last_values if values is None else values
-        self._held = {i: v for i, v in enumerate(src)}
+        exempt = {n - 1 for n in self.HOLD_EXEMPT}
+        self._held = {i: v for i, v in enumerate(src) if i not in exempt}
         self._hold_ref = {}
 
     def holding(self):

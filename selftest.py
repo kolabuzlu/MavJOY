@@ -164,35 +164,46 @@ def _check_rf_hold(wire, lk, mixer):
     pad = _FakePad()
     lk.gamepad = pad
 
+    # CH6 is held across a recovery; CH4 is a primary flight control and is
+    # never held. Both read the same stick, so one run shows both.
     pad.set_axis(0, 0.0)                      # stick centred, link healthy
     before = _pump(wire, lk, 1.5, 100)
     assert before, "no RC frames while the link is up"
-    # Channels left frozen by the input-dropout test above are correct and
-    # expected - nothing has moved them. Only the one under test matters.
-    assert 4 not in mixer.holding(), "CH4 was still frozen before the test"
-    centred = before[3]
-    print(f"   link up, stick centred:      CH4 = {centred}")
+    assert 6 not in mixer.holding(), "CH6 was still frozen before the test"
+    centred = before[5]
+    print(f"   link up, stick centred:      CH6 = {centred}  CH4 = {before[3]}")
 
     _pump(wire, lk, 1.2, 0)                   # link down, and confirmed down
     pad.set_axis(0, 1.0)                      # pilot moves it while deaf
     during = _pump(wire, lk, 0.8, 0)
-    print(f"   link down, stick moved:      CH4 = {during[3]} "
-          f"(never reaches the model)")
-    assert during[3] != centred, "the test did not actually move the stick"
+    print(f"   link down, stick moved:      CH6 = {during[5]}  "
+          f"CH4 = {during[3]} (neither reaches the model)")
+    assert during[5] != centred, "the test did not actually move the stick"
+    moved = during[3]
 
     after = _pump(wire, lk, 1.5, 100)         # back on the air
-    print(f"   link back, stick still over: CH4 = {after[3]}")
-    assert after[3] == centred, (
+    print(f"   link back, stick still over: CH6 = {after[5]}  "
+          f"CH4 = {after[3]}")
+    assert after[5] == centred, (
         f"the model would have been handed the new position: "
-        f"CH4 came back as {after[3]}, not the {centred} it had when the "
+        f"CH6 came back as {after[5]}, not the {centred} it had when the "
         f"link dropped")
-    assert 4 in mixer.holding(), "CH4 should be frozen after an RF recovery"
+    assert 6 in mixer.holding(), "CH6 should be frozen after an RF recovery"
+
+    # The whole point of the exemption: a pilot who has just got the link
+    # back needs the sticks, so CH1-4 follow them at once.
+    assert after[3] == moved, (
+        f"CH4 is a primary flight control and must not be held: it came "
+        f"back as {after[3]}, not the {moved} the stick is actually at")
+    assert not ({1, 2, 3, 4} & set(mixer.holding())), (
+        f"CH1-4 must never be frozen, got {mixer.holding()}")
+    print(f"   ... CH4 followed the stick, and is not in {mixer.holding()}")
 
     pad.set_axis(0, -1.0)                     # pilot takes the channel back
     released = _pump(wire, lk, 1.0, 100)
-    print(f"   pilot moves it:              CH4 = {released[3]} (released)")
-    assert released[3] != centred, "the channel never released"
-    assert 4 not in mixer.holding(), "CH4 should have released once moved"
+    print(f"   pilot moves it:              CH6 = {released[5]} (released)")
+    assert released[5] != centred, "the channel never released"
+    assert 6 not in mixer.holding(), "CH6 should have released once moved"
 
 
 def _check_oneway():
@@ -350,6 +361,9 @@ def _run(wire):
     cfg["channels"][2] = {"src": "throttle", "idx": 0, "inv": False}
     cfg["channels"][3] = {"src": "axis", "idx": 0, "inv": False}
     cfg["channels"][4] = {"src": "toggle", "idx": 7, "inv": False}
+    # CH6 reads the same axis as CH4 on purpose: one is exempt from the
+    # resume hold and the other is not, so the same stick shows both.
+    cfg["channels"][5] = {"src": "axis", "idx": 0, "inv": False}
     mixer = gp.Mixer(cfg)
     mixer.reset()
 
