@@ -191,6 +191,12 @@ class App(tk.Tk):
                                 bg=self.pal["idle"], fg=self.pal["on_accent"], padx=8, pady=8)
         self.arm_lbl.pack(side="left", padx=(8, 0))
 
+        self.lq_lbl = tk.Label(status, text="LQ: \u2014", width=14,
+                               font=("TkDefaultFont", 13, "bold"),
+                               bg=self.pal["idle"], fg=self.pal["on_accent"],
+                               padx=8, pady=8)
+        self.lq_lbl.pack(side="left", padx=(8, 0))
+
         thr_frame = ttk.Frame(status)
         thr_frame.pack(side="left", padx=16)
         ttk.Label(thr_frame, text="Throttle").pack(anchor="w")
@@ -1392,8 +1398,10 @@ class App(tk.Tk):
                 self.rf_lbl.config(
                     text=f"LQ {link['up_lq']}%  RSSI {link['up_rssi_1']} dBm  "
                          f"SNR {link['up_snr']}  {link.get('tx_power_mw') or '?'} mW")
+                self._set_lq(link["up_lq"])
             else:
                 self.rf_lbl.config(text="no telemetry")
+                self._set_lq(None)
             self.status_var.set(
                 f"sent {stats.frames_sent}   skipped {stats.frames_skipped}   "
                 f"telemetry frames {stats.telem_frames}   crc errors {stats.crc_errors}"
@@ -1402,6 +1410,7 @@ class App(tk.Tk):
         else:
             self.rate_lbl.config(text="\u2014 Hz")
             self.rf_lbl.config(text="no telemetry")
+            self._set_lq(None)
             src = "simulated pad" if self.simulate else (
                 state.device_name if state.connected else "no gamepad")
             self.status_var.set(f"idle   |   input: {src}")
@@ -1453,6 +1462,26 @@ class App(tk.Tk):
 
         hats = state.hats if state.hats else "\u2014"
         self.hat_lbl.config(text=f"hats: {hats}")
+
+    # Uplink LQ is the number that says whether the model is still listening.
+    # ExpressLRS itself warns below 70 and treats the link as failing well
+    # before zero, so the bands are drawn where they start to matter rather
+    # than only at total loss.
+    LQ_GOOD = 80
+    LQ_MARGINAL = 50
+
+    def _set_lq(self, lq):
+        """Paint the link-quality chip, or grey it when nothing is coming back."""
+        if lq is None:
+            self.lq_lbl.config(text="LQ: —", bg=self.pal["idle"])
+            return
+        if lq >= self.LQ_GOOD:
+            colour = self.pal["ok"]
+        elif lq >= self.LQ_MARGINAL:
+            colour = self.pal["warn"]
+        else:
+            colour = self.pal["danger"]
+        self.lq_lbl.config(text=f"LQ: {lq}%", bg=colour)
 
     def _update_telemetry(self, telem, stats):
         lines = []
