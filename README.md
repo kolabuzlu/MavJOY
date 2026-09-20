@@ -52,13 +52,19 @@ FT232R reprogrammed with FT_PROG to invert TXD/RXD — a CP2102 or CH340 cannot
 do this. Don't attach a LiPo to the module while it shares a ground with your
 motherboard.
 
-Baud: **115200 over a CP210x USB-C connection** — not 400000. ExpressLRS
-auto-detects from `{400000, 115200, 5250000, 3750000, 1870000, 921600,
-2250000}`, but the CP2102 bridge on the BetaFPV Micro does not divide 400000
-cleanly, so the module never sees a valid frame and stays silent. Measured on
-a BFPV 2G4Micro1W: 115200 and 921600 both give clean telemetry with zero CRC
-errors; 400000 returns nothing at all. 115200 caps the packet rate at 250 Hz,
-which is the default here. Use 921600 if you want 500 Hz.
+Baud: **921600 over a CP210x USB-C connection** — not 400000, which is
+what the ExpressLRS documentation tells you to use. ExpressLRS auto-detects
+from `{400000, 115200, 5250000, 3750000, 1870000, 921600, 2250000}`, but the
+CP2102 bridge on the BetaFPV Micro does not divide 400000 cleanly, so the
+module never sees a valid frame and stays silent. Measured on a
+BFPV 2G4Micro1W: 921600 and 115200 both give clean telemetry with zero CRC
+errors; 400000 returns nothing at all.
+
+921600 is the default because the baud also decides which packet rates the
+module will offer. At 115200 it lists five and blanks out two; at 921600 the
+same module lists ten, including 333Hz Full, 500Hz, D500, F500 and F1000.
+115200 still works if you need it, but it caps the packet rate at 250 Hz and
+hides everything above.
 
 Verify with `python probe.py` — it pings the module and prints its name if
 CRSF is getting through.

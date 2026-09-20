@@ -35,7 +35,7 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 
 DEFAULT_CONFIG = {
     "port": "",
-    "baud": 400000,
+    "baud": 921600,
     "rate_hz": 250,
     "theme": "dark",
     "rate_auto": True,    # follow the rate the module asks for in its sync frames
