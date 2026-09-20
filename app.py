@@ -122,7 +122,7 @@ class App(tk.Tk):
         self.config(menu=menubar)
 
     LOGO_FILE = "mavjoyback.png"
-    LOGO_PX = 64            # roughly the height of the two rows beside it
+    LOGO_PX = 56            # tall enough to read, without stretching the row
 
     def _load_logo(self, target_px):
         """The logo, scaled to about target_px tall, or None if it is absent.
@@ -144,23 +144,11 @@ class App(tk.Tk):
         top = ttk.LabelFrame(self, text="Link")
         top.pack(fill="x", padx=8, pady=(8, 4))
 
-        # The two rows leave the right-hand end of this panel empty at any
-        # sensible window width, so the logo goes there. The reference is
-        # kept on self because Tk discards an image nothing holds, which
-        # shows up as a widget that is simply blank.
+        # The reference is kept on self because Tk discards an image
+        # nothing holds, which shows up as a widget that is simply blank.
         self._logo_img = self._load_logo(self.LOGO_PX)
-        if self._logo_img is not None:
-            # The PNG has a solid black background and no alpha, so the
-            # label is told to match it rather than leaving the theme's
-            # panel colour framing a black square.
-            tk.Label(top, image=self._logo_img, bg="#000000",
-                     borderwidth=0, highlightthickness=0).pack(
-                side="right", padx=(12, 10), pady=6)
 
-        rows = ttk.Frame(top)
-        rows.pack(side="left", fill="x", expand=True)
-
-        row = ttk.Frame(rows)
+        row = ttk.Frame(top)
         row.pack(fill="x", padx=6, pady=6)
 
         ttk.Label(row, text="Serial port").pack(side="left")
@@ -190,7 +178,7 @@ class App(tk.Tk):
         self._rate_warned = None
         self._on_rate_auto()
 
-        row2 = ttk.Frame(rows)
+        row2 = ttk.Frame(top)
         row2.pack(fill="x", padx=6, pady=(0, 6))
 
         ttk.Label(row2, text="Gamepad").pack(side="left")
@@ -217,6 +205,17 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(row2, text="STOP  (Esc)", state="disabled",
                                    command=lambda: self.stop_link(reason="stopped by user"))
         self.stop_btn.pack(side="right", padx=4)
+
+        # Inboard of the buttons, centred in whatever the row has left over.
+        # Packed after them so it lands to their left, and expand hands it
+        # the slack so it centres in that gap instead of butting up against
+        # one end of it. The PNG has a solid black background and no alpha,
+        # so the label is told to match rather than leaving the theme's
+        # panel colour framing a black square.
+        if self._logo_img is not None:
+            tk.Label(row2, image=self._logo_img, bg="#000000",
+                     borderwidth=0, highlightthickness=0).pack(
+                side="right", expand=True)
 
         # ---- big live status strip
         status = ttk.Frame(self)
