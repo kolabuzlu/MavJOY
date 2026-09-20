@@ -187,6 +187,11 @@ class CrsfLink(threading.Thread):
         # What the module says it wants from us, from its 0x3A sync frames.
         self.sync = None
 
+        # ExpressLRS status: whether a receiver is connected, and the reason
+        # it gives when it will not accept a setting.
+        self.elrs_status = None
+        self._status_next = 0.0
+
     def on_event(self, level, message):
         """Report an event. A broken callback must never kill the link."""
         try:
@@ -322,6 +327,7 @@ class CrsfLink(threading.Thread):
                 self.stats.frames_skipped += 1
             self._read_telemetry()
             self._service_jobs()
+            self._service_status()
             return
 
         if not self.transmitting:
@@ -348,6 +354,7 @@ class CrsfLink(threading.Thread):
 
         self._read_telemetry()
         self._service_jobs()
+        self._service_status()
 
     def _read_telemetry(self):
         try:
@@ -369,6 +376,12 @@ class CrsfLink(threading.Thread):
             if ftype in (crsf.FRAMETYPE_DEVICE_INFO,
                          crsf.FRAMETYPE_PARAMETER_SETTINGS_ENTRY):
                 self._feed_job(ftype, payload)
+            elif ftype == crsf.FRAMETYPE_ELRS_STATUS:
+                status = crsf.parse_elrs_status(payload)
+                if status:
+                    status["_t"] = time.monotonic()
+                    with self._lock:
+                        self.elrs_status = status
             elif ftype == crsf.FRAMETYPE_RADIO_ID:
                 sync = crsf.parse_opentx_sync(payload)
                 if sync:
@@ -390,6 +403,37 @@ class CrsfLink(threading.Thread):
     # --------------------------------------------------- module settings
     JOB_RESEND = 0.15     # resend an unanswered request this often
     JOB_TIMEOUT = 5.0     # give up on a job after this long with no progress
+
+    STATUS_INTERVAL = 2.0     # how often to ask the module how it is doing
+
+    def _service_status(self):
+        """Poll the ExpressLRS status frame. It carries the reason a setting
+        was refused, which is otherwise invisible - the value just reverts."""
+        if self._job is not None:
+            return                      # never interleave with a settings job
+        now = time.monotonic()
+        if now < self._status_next:
+            return
+        self._status_next = now + self.STATUS_INTERVAL
+        try:
+            self._ser.write(crsf.elrs_status_request_frame())
+        except Exception:
+            pass
+
+    def status(self):
+        """Latest ELRS status, or None if it has not answered recently."""
+        with self._lock:
+            status = self.elrs_status
+        if not status or time.monotonic() - status.get("_t", 0) > 6.0:
+            return None
+        return status
+
+    def clear_warning(self):
+        """Acknowledge a warning so the module stops repeating it."""
+        try:
+            self._ser.write(crsf.elrs_clear_warning_frame())
+        except Exception:
+            pass
 
     def _service_jobs(self):
         now = time.monotonic()
@@ -430,6 +474,7 @@ class CrsfLink(threading.Thread):
 
     def _finish_job(self, result, error):
         job, self._job = self._job, None
+        self._status_next = 0.0     # re-ask now; a write may have been refused
         if job is None or job.on_done is None:
             return
         try:

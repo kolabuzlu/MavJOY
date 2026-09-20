@@ -52,6 +52,7 @@ class App(tk.Tk):
         self._field_vars = {}               # index -> the tk var editing it
         self._cmd_index = None              # command currently running
         self._telem_last = ""               # last telemetry text drawn
+        self._pending_write = None          # (field index, value) we asked for
         self._device = None                 # DEVICE_INFO from the module
 
         self.gamepad = (gp.SimGamepadThread() if simulate else gp.GamepadThread())
@@ -858,6 +859,7 @@ class App(tk.Tk):
         return bool(self.link and self.link.running)
 
     def _write_field(self, index, value, description):
+        self._pending_write = (index, value)
         self.module_info_lbl.config(text=f"writing {description} ...")
         self.log("info", f"Module: setting {description}")
         self.link.submit("write", index=index, value=value,
@@ -866,9 +868,40 @@ class App(tk.Tk):
     def _after_write(self, field):
         """ExpressLRS can change other fields in response, so reload them all."""
         self._fields[field.index] = field
-        self.log("info", f"Module: {field.name} is now {field.display}")
+        pending = self._pending_write
+        self._pending_write = None
+
+        refused = (pending is not None and pending[0] == field.index
+                   and field.value != pending[1])
+        if refused:
+            # The reason arrives in the next status frame, which the link asks
+            # for as soon as a settings job finishes. Give it a moment.
+            self.after(600, lambda f=field, want=pending[1]: self._report_refusal(f, want))
+        else:
+            self.log("info", f"Module: {field.name} is now {field.display}")
         if self._device:
             self._request_field(1)
+
+    def _report_refusal(self, field, wanted_value):
+        """Say why a setting did not take. ExpressLRS reports a reason, but
+        only if asked - otherwise the value just quietly reverts."""
+        wanted = (field.label_for(wanted_value)
+                  if field.type == crsf.PARAM_SELECT else str(wanted_value))
+        status = self.link.status() if self.link else None
+        reason = (status or {}).get("info", "")
+        if status and status.get("warning") and self.link:
+            self.link.clear_warning()   # latched until acknowledged
+
+        message = (f"The module would not take {field.name} = {wanted} and is "
+                   f"still on {field.display}.")
+        if reason:
+            message += f" It says: {reason}."
+        else:
+            message += (" ExpressLRS blocks some settings depending on the "
+                        "packet rate, the telemetry ratio and whether a "
+                        "receiver is connected.")
+        self.log("warn", message)
+        messagebox.showwarning("Setting refused", message)
 
     def _on_select_changed(self, index):
         field = self._fields.get(index)

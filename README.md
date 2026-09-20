@@ -186,11 +186,20 @@ F500 and F1000 appear as well. Nothing is wrong with the module — the
 handset link cannot feed those rates, so it hides them. The Module tab says
 how many are hidden and suggests raising the baud.
 
-**Switch Mode depends on the packet rate**, and changes with it. At
-100Hz Full the options are `8ch`, `16ch Rate/2`, `12ch Mixed`; at 150Hz the
-same field offers `Wide` and `Hybrid`. Some combinations are refused
-outright, and a rate change can move Switch Mode on its own. If a Switch
-Mode will not take, change the packet rate first and set it there.
+**Switch Mode cannot be changed while a receiver is connected.** This is
+the one that looks most like a bug: you pick a mode, nothing happens, no
+error. Power the model down, change it, power back up. Switch Mode also
+depends on the packet rate and changes with it — at 100Hz Full the options
+are `8ch`, `16ch Rate/2`, `12ch Mixed`, while at 150Hz the same field
+offers `Wide` and `Hybrid`.
+
+MavJOY asks the module why. ExpressLRS reports its state in `0x2E` status
+frames, carrying flags and a sentence such as `Not while connected`, but
+only when something asks for them — nothing does by default, which is why a
+refused setting normally just reverts in silence. The app polls that frame,
+and when a write does not take it repeats the module's own words back to
+you. Warnings latch until acknowledged, so it clears them after showing
+them, the same way the Lua script does.
 
 
 

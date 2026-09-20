@@ -621,3 +621,45 @@ def recommended_crsf_rate(requested_hz: float, baud: int) -> int:
     if requested_hz <= 0:
         return cap
     return int(max(50, min(cap, requested_hz * 3)))
+
+
+# ------------------------------------------------------------ ELRS status
+# ExpressLRS will not apply some settings in some states, and says so rather
+# than erroring: ask for the status frame and it answers with flags plus a
+# sentence, e.g. "Not while connected" when a receiver is linked. Without
+# this a refused write just looks like the value silently reverting.
+#
+# The request is a parameter write to field 0. Bit 0 of the flags means a
+# receiver is connected; anything above 0x1F is a warning carrying text,
+# which is acknowledged by writing 0 to field 0x2E.
+ELRS_STATUS_FIELD = 0x00
+ELRS_FLAGS_CLEAR_FIELD = 0x2E
+ELRS_FLAG_CONNECTED = 0x01
+ELRS_FLAG_WARNING = 0x20
+
+
+def elrs_status_request_frame() -> bytes:
+    return param_write_frame(ELRS_STATUS_FIELD, 0)
+
+
+def elrs_clear_warning_frame() -> bytes:
+    return param_write_frame(ELRS_FLAGS_CLEAR_FIELD, 0)
+
+
+def parse_elrs_status(payload: bytes):
+    """CRSF_FRAMETYPE_ELRS_STATUS (0x2E) -> dict, or None."""
+    if len(payload) < 7:
+        return None
+    try:
+        info, _ = _cstr(payload, 6)
+    except ValueError:
+        info = ""
+    flags = payload[5]
+    return {
+        "bad_packets": payload[2],
+        "good_packets": int.from_bytes(payload[3:5], "big"),
+        "flags": flags,
+        "connected": bool(flags & ELRS_FLAG_CONNECTED),
+        "warning": flags > 0x1F,
+        "info": info,
+    }
