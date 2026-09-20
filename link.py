@@ -578,6 +578,15 @@ class CrsfLink(threading.Thread):
         self._service_jobs()
         self._service_status()
 
+    # Frames that are protocol rather than sensors: handled above, and not
+    # worth reporting as something we failed to decode.
+    _HANDLED_FRAMES = frozenset((
+        crsf.FRAMETYPE_RC_CHANNELS_PACKED, crsf.FRAMETYPE_DEVICE_INFO,
+        crsf.FRAMETYPE_PARAMETER_SETTINGS_ENTRY, crsf.FRAMETYPE_ELRS_STATUS,
+        crsf.FRAMETYPE_RADIO_ID, crsf.FRAMETYPE_DEVICE_PING,
+        crsf.FRAMETYPE_PARAMETER_READ, crsf.FRAMETYPE_PARAMETER_WRITE,
+    ))
+
     def _read_telemetry(self):
         try:
             waiting = self._ser.in_waiting
@@ -621,6 +630,15 @@ class CrsfLink(threading.Thread):
                     with self._lock:
                         self.telemetry[key] = parsed
                         self.telemetry[key]["_t"] = time.monotonic()
+            elif ftype not in self._HANDLED_FRAMES:
+                # A sensor we cannot read yet. Counting it beats dropping it
+                # silently: what a given aircraft actually sends is a
+                # question its own telemetry can answer, and guessing from
+                # the spec is how sensors end up missing for no reason.
+                with self._lock:
+                    seen = self.telemetry.setdefault("unknown", {})
+                    seen[f"0x{ftype:02X}"] = seen.get(f"0x{ftype:02X}", 0) + 1
+                    seen["_t"] = time.monotonic()
 
     # --------------------------------------------------- module settings
     JOB_RESEND = 0.15     # resend an unanswered request this often

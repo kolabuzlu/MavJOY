@@ -440,6 +440,43 @@ expires. A fixed wait was wrong in both directions — too slow for quick
 fields, and short enough that a Packet Rate change that had actually
 succeeded was reported as refused.
 
+## Telemetry
+
+What comes back from the model is decoded into seven groups, shown in the
+Telemetry tab:
+
+| Frame | | Values |
+|---|---|---|
+| `0x14` link statistics | 10 | up RSSI 1/2, up LQ, up SNR, antenna, RF mode, TX power, down RSSI, down LQ, down SNR |
+| `0x02` GPS | 6 | lat, lon, ground speed, heading, altitude, sats |
+| `0x08` battery | 4 | voltage, current, capacity used, remaining % |
+| `0x1E` attitude | 3 | pitch, roll, yaw |
+| `0x09` baro altitude | 2 | altitude, vertical speed when the sender includes it |
+| `0x21` flight mode | 1 | the mode name, e.g. `RTL` |
+| `0x07` vario | 1 | vertical speed |
+
+**Flight mode gets its own banner**, next to LQ. It is green while the model
+is reporting, and grey when it is not — a flight mode is acted on, and the
+model can change mode by itself, so a name left over from before the
+telemetry stopped would read as current when it is not. Anything beyond ten
+characters is trimmed to keep the strip from jumping about.
+
+It is the only readout here the model actually reports. Everything else on
+that strip is inferred from what MavJOY sends, so after a failsafe this is
+what tells you whether the aircraft is still in RTL — rather than working it
+out from channel values.
+
+### Sensors this app cannot read yet
+
+There is no sensor discovery: the decode table is fixed, and a frame type
+that is not in it carries no clue about what its bytes mean. Rather than
+drop those frames silently, they are counted by type and listed in the
+Telemetry tab under **sensors this app cannot decode yet**.
+
+So if your aircraft sends RPM, temperature or cell voltages, the tab will
+show `0x0C`, `0x0D` or `0x0E` ticking up, which is a concrete answer to
+what is worth adding next instead of a guess from the specification.
+
 ## Failsafe
 
 If channel data stops — gamepad unplugged, dongle jammed, app closed, Esc

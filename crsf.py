@@ -250,11 +250,68 @@ def parse_gps(payload: bytes):
             "heading": heading, "altitude_m": altitude, "sats": sats}
 
 
+def parse_flight_mode(payload: bytes):
+    """CRSF_FRAMETYPE_FLIGHT_MODE (0x21) -> dict.
+
+    A NUL-terminated string straight from the flight controller: RTL, AUTO,
+    FBWA and so on. It is the only telemetry that says outright what the
+    model is doing, rather than leaving it to be inferred from channel
+    values - which is exactly the question a failsafe raises.
+    """
+    if not payload:
+        return None
+    try:
+        mode, _ = _cstr(payload, 0)
+    except ValueError:
+        # Some senders leave the terminator off the last frame.
+        mode = payload.decode("ascii", "replace")
+    mode = mode.strip()
+    return {"mode": mode} if mode else None
+
+
+def parse_vario(payload: bytes):
+    """CRSF_FRAMETYPE_VARIO (0x07) -> dict. Vertical speed, cm/s on the wire."""
+    if len(payload) < 2:
+        return None
+    return {"vertical_speed_ms":
+            int.from_bytes(payload[0:2], "big", signed=True) / 100.0}
+
+
+def _baro_metres(raw):
+    """Decode the packed baro altitude.
+
+    Two encodings share the field: with the top bit set the rest is whole
+    metres, otherwise it is decimetres biased by 10000 so that a value below
+    launch height still fits an unsigned number.
+    """
+    if raw & 0x8000:
+        return float(raw & 0x7FFF)
+    return (raw - 10000) / 10.0
+
+
+def parse_baro_altitude(payload: bytes):
+    """CRSF_FRAMETYPE_BARO_ALTITUDE (0x09) -> dict.
+
+    Newer senders append vertical speed to the same frame; older ones send
+    the altitude alone, so the second field is taken only if it is there.
+    """
+    if len(payload) < 2:
+        return None
+    out = {"altitude_m": _baro_metres(int.from_bytes(payload[0:2], "big"))}
+    if len(payload) >= 4:
+        out["vertical_speed_ms"] = int.from_bytes(
+            payload[2:4], "big", signed=True) / 100.0
+    return out
+
+
 FRAME_PARSERS = {
     FRAMETYPE_LINK_STATISTICS: ("link", parse_link_statistics),
     FRAMETYPE_BATTERY_SENSOR: ("battery", parse_battery),
     FRAMETYPE_ATTITUDE: ("attitude", parse_attitude),
     FRAMETYPE_GPS: ("gps", parse_gps),
+    FRAMETYPE_FLIGHT_MODE: ("mode", parse_flight_mode),
+    FRAMETYPE_VARIO: ("vario", parse_vario),
+    FRAMETYPE_BARO_ALTITUDE: ("baro", parse_baro_altitude),
 }
 
 

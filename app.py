@@ -197,6 +197,14 @@ class App(tk.Tk):
                                padx=8, pady=8)
         self.lq_lbl.pack(side="left", padx=(8, 0))
 
+        # What the model says it is doing, in its own words. Every other
+        # chip here is inferred from what we send; this one is reported.
+        self.mode_lbl = tk.Label(status, text="MODE: —", width=16,
+                                 font=("TkDefaultFont", 13, "bold"),
+                                 bg=self.pal["idle"], fg=self.pal["on_accent"],
+                                 padx=8, pady=8)
+        self.mode_lbl.pack(side="left", padx=(8, 0))
+
         thr_frame = ttk.Frame(status)
         thr_frame.pack(side="left", padx=16)
         ttk.Label(thr_frame, text="Throttle").pack(anchor="w")
@@ -1553,6 +1561,7 @@ class App(tk.Tk):
             else:
                 self.rf_lbl.config(text="no telemetry")
                 self._set_lq(None)
+            self._set_mode(telem.get("mode"))
             held = self.mixer.holding()
             if held:
                 names = ", ".join(f"CH{n}" for n in held[:6])
@@ -1570,6 +1579,7 @@ class App(tk.Tk):
             self.rate_lbl.config(text="\u2014 Hz")
             self.rf_lbl.config(text="no telemetry")
             self._set_lq(None)
+            self._set_mode(None)
             src = "simulated pad" if self.simulate else (
                 state.device_name if state.connected else "no gamepad")
             self.status_var.set(f"idle   |   input: {src}")
@@ -1642,15 +1652,36 @@ class App(tk.Tk):
             colour = self.pal["danger"]
         self.lq_lbl.config(text=f"LQ: {lq}%", bg=colour)
 
+    # A flight mode is acted on, so a stale one is worse than none: the
+    # model can change mode by itself - a failsafe is exactly that - and a
+    # name left over from before the telemetry stopped would read as current.
+    MODE_STALE = 3.0
+    MODE_MAX_CHARS = 10
+
+    def _set_mode(self, data):
+        """Paint the flight-mode chip with what the model reports."""
+        name = (data or {}).get("mode")
+        fresh = data and time.monotonic() - data.get("_t", 0) < self.MODE_STALE
+        if not name or not fresh:
+            self.mode_lbl.config(text="MODE: —", bg=self.pal["idle"])
+            return
+        self.mode_lbl.config(text=f"MODE: {name[:self.MODE_MAX_CHARS]}",
+                             bg=self.pal["ok"])
+
     def _update_telemetry(self, telem, stats):
         lines = []
         now = time.monotonic()
-        for key in ("link", "battery", "attitude", "gps"):
+        for key in ("mode", "link", "battery", "attitude", "baro", "vario",
+                    "gps", "unknown"):
             data = telem.get(key)
             if not data:
                 continue
             age = now - data.get("_t", now)
-            lines.append(f"[{key}]  ({age:.1f}s ago)")
+            if key == "unknown":
+                lines.append(f"[sensors this app cannot decode yet]  "
+                             f"({age:.1f}s ago)")
+            else:
+                lines.append(f"[{key}]  ({age:.1f}s ago)")
             for k, v in data.items():
                 if k == "_t":
                     continue

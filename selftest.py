@@ -382,6 +382,32 @@ def _run(wire):
     print("telemetry decoded:", telem.get("link"))
     assert telem.get("link", {}).get("up_lq") == 100
 
+    # ---- the sensors that used to be dropped on the floor
+    def sensor(ftype, payload):
+        body = bytes([ftype]) + payload
+        return bytes([0xEA, len(body) + 1]) + body + bytes([crsf.crc8(body)])
+
+    wire.inject(sensor(crsf.FRAMETYPE_FLIGHT_MODE, b"RTL" + bytes([0])))
+    wire.inject(sensor(crsf.FRAMETYPE_VARIO, bytes([0xFF, 0x9C])))
+    wire.inject(sensor(crsf.FRAMETYPE_BARO_ALTITUDE, bytes([0x27, 0x1A])))
+    time.sleep(0.3)
+    telem, _stats = lk.snapshot()
+    print(f"flight mode: {telem.get('mode')}")
+    print(f"vario:       {telem.get('vario')}")
+    print(f"baro:        {telem.get('baro')}")
+    assert telem.get("mode", {}).get("mode") == "RTL", "flight mode not decoded"
+    assert telem.get("vario", {}).get("vertical_speed_ms") == -1.0
+    assert telem.get("baro", {}).get("altitude_m") == 1.0
+
+    # An RPM frame: a real sensor this app cannot read yet. It must be
+    # counted rather than dropped, so the Telemetry tab can say what the
+    # aircraft is actually sending instead of leaving it to guesswork.
+    wire.inject(sensor(0x0C, bytes([0, 0, 1, 0])))
+    time.sleep(0.3)
+    telem, _stats = lk.snapshot()
+    print(f"undecoded:   {dict((k, v) for k, v in telem.get('unknown', {}).items() if k != '_t')}")
+    assert telem.get("unknown", {}).get("0x0C") == 1, "unknown frame not counted"
+
     # ---- failsafe: no pulses, then pulses again.
     # A transmitter does not shut down because a stick stopped reporting.
     # It stops putting frames out, the receiver falls into its own
