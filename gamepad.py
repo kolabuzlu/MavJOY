@@ -59,26 +59,43 @@ class InputState:
 
 
 class GamepadThread(threading.Thread):
-    """Owns pygame, polls the selected pad at `rate_hz`, publishes InputState."""
+    """Owns pygame and polls every selected device, publishing one InputState
+    per slot.
+
+    More than one device is normal: a pad for the sticks and a separate USB
+    throttle, say. Each slot is polled independently and carries its own
+    timestamp, so one device dying is visible on its own rather than being
+    hidden behind another that is still reporting. The link thread checks
+    every slot the map actually uses.
+    """
 
     def __init__(self, rate_hz: int = 250):
         super().__init__(name="gamepad", daemon=True)
         self._period = 1.0 / rate_hz
         self._lock = threading.Lock()
-        self._state = InputState()
+        self._states = {}            # slot -> InputState
         self._devices = []
-        self._wanted = None          # index the GUI asked for
+        self._wanted = {}            # slot -> device index the GUI asked for
         self._rescan = threading.Event()
         self._stop_event = threading.Event()
-        self._joy = None
-        self._open_index = None
+        self._joys = {}              # slot -> pygame joystick
+        self._open_index = {}        # slot -> device index actually open
         self.error = ""
 
     # ---------------------------------------------------------- public API
     @property
     def state(self) -> InputState:
+        """Slot 0, for callers that only care about the primary device."""
+        return self.state_for(0)
+
+    def state_for(self, slot: int) -> InputState:
         with self._lock:
-            return self._state
+            return self._states.get(slot) or InputState()
+
+    @property
+    def states(self):
+        with self._lock:
+            return dict(self._states)
 
     @property
     def devices(self):
@@ -87,10 +104,15 @@ class GamepadThread(threading.Thread):
 
     @property
     def open_index(self):
-        return self._open_index
+        return self._open_index.get(0)
 
-    def select(self, index):
-        self._wanted = index
+    @property
+    def open_indexes(self):
+        return dict(self._open_index)
+
+    def select(self, index, slot: int = 0):
+        """Put device `index` in `slot`; None empties the slot."""
+        self._wanted[slot] = index
         self._rescan.set()
 
     def rescan(self):
@@ -116,7 +138,8 @@ class GamepadThread(threading.Thread):
             if self._rescan.is_set():
                 self._rescan.clear()
                 self._scan()
-                self._open(self._wanted)
+                for slot, index in list(self._wanted.items()):
+                    self._open(slot, index)
 
             self._poll()
 
@@ -127,7 +150,7 @@ class GamepadThread(threading.Thread):
             else:
                 next_t = time.perf_counter()
 
-        self._close()
+        self._close_all()
         pygame.quit()
 
     # ------------------------------------------------------------ internal
@@ -137,61 +160,65 @@ class GamepadThread(threading.Thread):
         names = []
         for i in range(pygame.joystick.get_count()):
             try:
-                j = pygame.joystick.Joystick(i)
-                names.append(j.get_name())
+                names.append(pygame.joystick.Joystick(i).get_name())
             except Exception:
                 names.append(f"device {i}")
         with self._lock:
             self._devices = names
-        # a rescan invalidates the handle we had
-        self._joy = None
-        self._open_index = None
+        # a rescan invalidates every handle we held
+        self._joys = {}
+        self._open_index = {}
 
-    def _open(self, index):
-        self._close()
+    def _open(self, slot, index):
+        self._close(slot)
         if index is None:
             return
         try:
-            self._joy = pygame.joystick.Joystick(index)
-            self._joy.init()
-            self._open_index = index
+            joy = pygame.joystick.Joystick(index)
+            joy.init()
+            self._joys[slot] = joy
+            self._open_index[slot] = index
             self.error = ""
         except Exception as exc:
-            self._joy = None
-            self._open_index = None
             self.error = f"could not open gamepad {index}: {exc}"
 
-    def _close(self):
-        if self._joy is not None:
+    def _close(self, slot):
+        joy = self._joys.pop(slot, None)
+        if joy is not None:
             try:
-                self._joy.quit()
+                joy.quit()
             except Exception:
                 pass
-        self._joy = None
-        self._open_index = None
+        self._open_index.pop(slot, None)
+
+    def _close_all(self):
+        for slot in list(self._joys):
+            self._close(slot)
 
     def _poll(self):
-        if self._joy is None:
-            with self._lock:
-                self._state = InputState(connected=False, timestamp=time.monotonic())
-            return
-        try:
-            axes = tuple(self._joy.get_axis(i) for i in range(self._joy.get_numaxes()))
-            buttons = tuple(bool(self._joy.get_button(i))
-                            for i in range(self._joy.get_numbuttons()))
-            hats = tuple(self._joy.get_hat(i) for i in range(self._joy.get_numhats()))
-            name = self._joy.get_name()
-        except Exception as exc:
-            self.error = f"gamepad read failed: {exc}"
-            self._close()
-            with self._lock:
-                self._state = InputState(connected=False, timestamp=time.monotonic())
-            return
-
+        fresh = {}
+        for slot in set(self._wanted) | set(self._joys):
+            joy = self._joys.get(slot)
+            if joy is None:
+                fresh[slot] = InputState(connected=False,
+                                         timestamp=time.monotonic())
+                continue
+            try:
+                fresh[slot] = InputState(
+                    axes=tuple(joy.get_axis(i) for i in range(joy.get_numaxes())),
+                    buttons=tuple(bool(joy.get_button(i))
+                                  for i in range(joy.get_numbuttons())),
+                    hats=tuple(joy.get_hat(i) for i in range(joy.get_numhats())),
+                    timestamp=time.monotonic(),
+                    device_name=joy.get_name(),
+                    connected=True)
+            except Exception as exc:
+                self.error = f"gamepad read failed: {exc}"
+                self._close(slot)
+                fresh[slot] = InputState(connected=False,
+                                         timestamp=time.monotonic())
         with self._lock:
-            self._state = InputState(axes=axes, buttons=buttons, hats=hats,
-                                     timestamp=time.monotonic(), device_name=name,
-                                     connected=True)
+            self._states = fresh
 
 
 class SimGamepadThread(threading.Thread):
@@ -215,6 +242,13 @@ class SimGamepadThread(threading.Thread):
         with self._lock:
             return self._state
 
+    def state_for(self, _slot: int) -> InputState:
+        return self.state          # every slot sees the same synthetic pad
+
+    @property
+    def states(self):
+        return {0: self.state}
+
     @property
     def devices(self):
         return ["Simulated F710 (X mode)"]
@@ -223,7 +257,11 @@ class SimGamepadThread(threading.Thread):
     def open_index(self):
         return 0
 
-    def select(self, index):
+    @property
+    def open_indexes(self):
+        return {0: 0}
+
+    def select(self, index, slot: int = 0):
         pass
 
     def rescan(self):
@@ -363,6 +401,8 @@ class ChannelMap:
     src: str = "none"
     idx: int = 0
     inv: bool = False
+    dev: int = 0                   # which gamepad slot this reads
+    arm: bool = False              # treat high on this channel as armed
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
     steps: int = 3                 # positions, for "cycle" and "switch"
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
@@ -382,12 +422,14 @@ class ChannelMap:
     def from_dict(cls, d):
         return cls(src=d.get("src", "none"), idx=int(d.get("idx", 0)),
                    inv=bool(d.get("inv", False)),
+                   dev=int(d.get("dev", 0)), arm=bool(d.get("arm", False)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
                    steps=int(d.get("steps", 3)),
                    buttons=tuple(d.get("buttons") or ()))
 
     def to_dict(self):
         out = {"src": self.src, "idx": self.idx, "inv": self.inv,
+               "dev": self.dev, "arm": self.arm,
                "value": self.value, "steps": self.steps}
         if self.buttons:
             out["buttons"] = list(self.buttons)
@@ -409,10 +451,13 @@ class Mixer:
         # whole pad means deadening the good axes to tame the worst one.
         self.axis_deadzone = {int(k): float(v)
                               for k, v in (config.get("axis_deadzone") or {}).items()}
+        # Latches are keyed by (device slot, input number): button 3 on the
+        # pad and button 3 on the throttle are different switches.
         self._toggles = {}
         self._cycles = {}
         self._switches = {}
-        self._prev_buttons = ()
+        self._prev_buttons = {}
+        self.throttle_dev = int(config.get("throttle", {}).get("dev", 0))
         self._last_t = None
         self.last_values = [crsf.CHANNEL_MID] * crsf.NUM_CHANNELS
 
@@ -425,7 +470,7 @@ class Mixer:
         self._toggles.clear()
         self._cycles.clear()
         self._switches.clear()
-        self._prev_buttons = ()
+        self._prev_buttons = {}
         self._last_t = None
         self.throttle.reset()
         self.last_values = self.failsafe_values()
@@ -441,28 +486,51 @@ class Mixer:
                 vals[i] = ch.value
         return vals
 
-    def compute(self, st: InputState):
+    def compute(self, states):
+        """Evaluate every channel. `states` is {slot: InputState}; a bare
+        InputState is accepted and treated as slot 0."""
+        if isinstance(states, InputState):
+            states = {0: states}
         now = time.monotonic()
         dt = 0.0 if self._last_t is None else min(now - self._last_t, 0.1)
         self._last_t = now
 
-        pressed = self._rising_edges(st.buttons)
-        thr = self.throttle.update(st, dt)
+        blank = InputState()
+        edges = {slot: self._rising_edges(slot, st.buttons)
+                 for slot, st in states.items()}
+        thr = self.throttle.update(states.get(self.throttle_dev) or blank, dt)
 
         vals = []
         for ch in self.channels:
-            vals.append(self._channel_value(ch, st, thr, pressed))
+            st = states.get(ch.dev) or blank
+            vals.append(self._channel_value(ch, st, thr,
+                                            edges.get(ch.dev, frozenset())))
         self.last_values = vals
         return vals
 
+    def required_devices(self):
+        """Slots the map actually reads.
+
+        The link stops if any of these goes quiet. Flying on a throttle that
+        stopped reporting is no better than flying on stale sticks, and the
+        two devices fail independently.
+        """
+        used = set()
+        for ch in self.channels:
+            if ch.src == "throttle":
+                used.add(self.throttle_dev)
+            elif ch.src not in ("none", "fixed"):
+                used.add(ch.dev)
+        return used or {0}
+
     # ------------------------------------------------------------ internals
-    def _rising_edges(self, buttons):
-        prev = self._prev_buttons
+    def _rising_edges(self, slot, buttons):
+        prev = self._prev_buttons.get(slot, ())
         edges = set()
         for i, b in enumerate(buttons):
             if b and not (i < len(prev) and prev[i]):
                 edges.add(i)
-        self._prev_buttons = tuple(buttons)
+        self._prev_buttons[slot] = tuple(buttons)
         return edges
 
     def _channel_value(self, ch: ChannelMap, st: InputState, thr: float, pressed):
@@ -490,18 +558,20 @@ class Mixer:
             return crsf.CHANNEL_MAX if on else crsf.CHANNEL_MIN
 
         if src == "toggle":
+            key = (ch.dev, ch.idx)
             if ch.idx in pressed:
-                self._toggles[ch.idx] = not self._toggles.get(ch.idx, False)
-            on = self._toggles.get(ch.idx, False)
+                self._toggles[key] = not self._toggles.get(key, False)
+            on = self._toggles.get(key, False)
             if ch.inv:
                 on = not on
             return crsf.CHANNEL_MAX if on else crsf.CHANNEL_MIN
 
         if src == "cycle":
             steps = max(2, min(6, ch.steps))
+            key = (ch.dev, ch.idx)
             if ch.idx in pressed:
-                self._cycles[ch.idx] = (self._cycles.get(ch.idx, 0) + 1) % steps
-            pos = self._cycles.get(ch.idx, 0)
+                self._cycles[key] = (self._cycles.get(key, 0) + 1) % steps
+            pos = self._cycles.get(key, 0)
             if ch.inv:
                 pos = steps - 1 - pos
             return crsf.CHANNEL_MIN + round(pos * (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)
@@ -519,9 +589,9 @@ class Mixer:
                 # Nothing lit. Real switches pass through a gap between
                 # detents, so hold the last position rather than snapping the
                 # channel to an end stop mid-move.
-                pos = self._switches.get(ch.idx, 0)
+                pos = self._switches.get((ch.dev, ch.idx), 0)
             else:
-                self._switches[ch.idx] = pos
+                self._switches[(ch.dev, ch.idx)] = pos
             if ch.inv:
                 pos = steps - 1 - pos
             return crsf.CHANNEL_MIN + round(pos * (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)
@@ -542,11 +612,26 @@ class Mixer:
         return dict(self._toggles)
 
     def armed_channels(self):
-        """Channels currently sitting at high on a latching source."""
+        """Channels that count as armed, for the display and the interlocks.
+
+        A toggle or a cycle off its first position counts on its own, since
+        that is what an arm switch normally is. Any other source counts once
+        the channel is flagged as an arm channel, so arming from a
+        three-position switch or a held button is caught by the same
+        interlocks. The flagged test reads the value actually computed, so
+        inv and the source's own rules are already accounted for.
+        """
         out = []
         for i, ch in enumerate(self.channels):
-            if ch.src == "toggle" and self._toggles.get(ch.idx, False) != ch.inv:
-                out.append(i + 1)
-            elif ch.src == "cycle" and self._cycles.get(ch.idx, 0) != 0:
+            key = (ch.dev, ch.idx)
+            armed = False
+            if ch.src == "toggle":
+                armed = self._toggles.get(key, False) != ch.inv
+            elif ch.src == "cycle":
+                armed = self._cycles.get(key, 0) != 0
+            if not armed and ch.arm:
+                armed = (i < len(self.last_values)
+                         and self.last_values[i] > crsf.CHANNEL_MID)
+            if armed:
                 out.append(i + 1)
         return out

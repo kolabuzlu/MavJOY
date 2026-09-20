@@ -128,6 +128,31 @@ arm), `cycle` (steps through 2–6 positions on each press), `switch` (a real
 multi-position switch — see below), `hat_x`/`hat_y` (d-pad), `fixed`,
 `throttle`, `none`.
 
+### More than one device
+
+A separate USB throttle is normal, so each channel picks the device it reads
+with the **dev** column, and the throttle engine has its own **Device**
+setting on the Throttle tab. Slot 0 is the pad; slot 1 is whatever else you
+plug in, chosen in the toolbar. The Inputs tab shows one slot at a time, so
+you can read off the axis numbers for either device.
+
+The important part is the failsafe. The two devices fail independently, and
+flying on a throttle that stopped reporting is no better than flying on
+stale sticks, so the link checks **every** device the map actually reads and
+stops transmitting if any of them goes quiet — not just the first one.
+Starting a link checks all of them too.
+
+Latches are keyed by device as well as input number, so button 3 on the pad
+and button 3 on the throttle are different switches.
+
+### Arming
+
+A channel can be flagged **arm** in the Channels tab. While it reads high
+the app refuses to change module settings and the ARM light is red. A
+`toggle` counts as an arm channel whether or not it is ticked, which is the
+old behaviour; the flag is what lets a three-position switch or a held
+button arm safely too.
+
 ### Multi-position switches
 
 A three-way switch on a gamepad usually reports as three separate buttons

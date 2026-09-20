@@ -300,6 +300,14 @@ class CrsfLink(threading.Thread):
             self.on_event("info", "Link closed")
 
     # ------------------------------------------------------------ internals
+    def _first_stale(self, states):
+        """The first device the map needs that is not reporting, if any."""
+        for slot in sorted(self.mixer.required_devices()):
+            st = states.get(slot) or InputState()
+            if not st.is_fresh():
+                return slot, st
+        return None, None
+
     @staticmethod
     def _sleep_until(deadline: float) -> float:
         """Sleep most of the way, then spin for the last millisecond."""
@@ -314,12 +322,18 @@ class CrsfLink(threading.Thread):
                 time.sleep(0)  # yield, then spin
 
     def _tick(self):
-        st: InputState = self.gamepad.state
+        # Every device the map reads has to be live, not just the first
+        # one. A separate USB throttle fails independently of the pad,
+        # and flying on a throttle that stopped reporting is no better
+        # than flying on stale sticks.
+        states = self.gamepad.states
+        stale_slot, st = self._first_stale(states)
 
-        if not st.is_fresh():
+        if stale_slot is not None:
             if self.transmitting:
-                reason = "gamepad disconnected" if not st.connected else \
-                         f"gamepad data stale ({st.age() * 1000:.0f} ms)"
+                where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
+                reason = f"{where} disconnected" if not st.connected else \
+                         f"{where} data stale ({st.age() * 1000:.0f} ms)"
                 self.on_event("warn", f"Stopped transmitting: {reason}. "
                                       f"Receiver will go to failsafe.")
             self.transmitting = False
@@ -334,7 +348,7 @@ class CrsfLink(threading.Thread):
             self.transmitting = True
             self.on_event("info", "Transmitting channel data")
 
-        values = self.mixer.compute(st)
+        values = self.mixer.compute(states)
         frame = crsf.pack_rc_channels(values, sync=self.sync_byte)
         try:
             self._ser.write(frame)

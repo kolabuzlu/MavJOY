@@ -40,10 +40,13 @@ DEFAULT_CONFIG = {
     "theme": "dark",
     "rate_auto": True,    # follow the rate the module asks for in its sync frames
     "sync_byte": 0xC8,
-    "gamepad_index": 0,
+    # One entry per device slot: slot 0 is the sticks, slot 1 can be a
+    # separate USB throttle. null leaves a slot empty.
+    "gamepads": [0, None],
     "deadzone": 0.05,
     "axis_deadzone": {},  # per-axis overrides, keyed by axis number
     "throttle": {
+        "dev": 0,             # which gamepad slot the throttle reads
         "mode": "ramp",
         "axis": 5,            # right trigger = throttle up
         "axis_down": 2,       # left trigger  = throttle down
@@ -108,6 +111,12 @@ def load(path: str = CONFIG_PATH):
         return default_config(), f"config.json could not be read ({exc}); using defaults"
 
     cfg = _merge(DEFAULT_CONFIG, data)
+    # Configs written before multi-device support named a single pad.
+    if "gamepads" not in data and "gamepad_index" in data:
+        cfg["gamepads"] = [data["gamepad_index"], None]
+    cfg["gamepads"] = list(cfg.get("gamepads") or [0, None])
+    while len(cfg["gamepads"]) < 2:
+        cfg["gamepads"].append(None)
     channels = data.get("channels")
     if isinstance(channels, list):
         cfg["channels"] = [dict(DEFAULT_CONFIG["channels"][i] if i < 16 else {},

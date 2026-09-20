@@ -154,9 +154,19 @@ class App(tk.Tk):
         ttk.Label(row2, text="Gamepad").pack(side="left")
         self.pad_var = tk.StringVar()
         self.pad_combo = ttk.Combobox(row2, textvariable=self.pad_var,
-                                      width=40, state="readonly")
+                                      width=28, state="readonly")
         self.pad_combo.pack(side="left", padx=(4, 2))
-        self.pad_combo.bind("<<ComboboxSelected>>", self.on_pad_selected)
+        self.pad_combo.bind("<<ComboboxSelected>>",
+                            lambda _e: self.on_pad_selected(0))
+
+        # A second slot, for a throttle or anything else on its own USB device.
+        ttk.Label(row2, text="Device 1").pack(side="left", padx=(10, 0))
+        self.pad_var_b = tk.StringVar()
+        self.pad_combo_b = ttk.Combobox(row2, textvariable=self.pad_var_b,
+                                        width=28, state="readonly")
+        self.pad_combo_b.pack(side="left", padx=(4, 2))
+        self.pad_combo_b.bind("<<ComboboxSelected>>",
+                              lambda _e: self.on_pad_selected(1))
         ttk.Button(row2, text="\u21bb", width=3,
                    command=self.refresh_gamepads).pack(side="left")
 
@@ -254,15 +264,17 @@ class App(tk.Tk):
     # One grid holds the headings and every row, so a column is a column and
     # nothing has to be lined up by guessing widths.
     CH_COLUMNS = (
-        # heading,   anchor, pad-left, pad-right, stretch
-        ("",         "w",     0,  6, 0),   # 0 CH number
-        ("source",   "w",     0,  6, 0),   # 1 source
-        ("index",    "w",     0,  6, 0),   # 2 index
-        ("inv",      "center", 0, 6, 0),   # 3 invert
-        ("steps",    "w",     0, 14, 0),   # 4 steps
-        ("value",    "w",     0,  8, 1),   # 5 bar
-        ("",         "e",     0, 10, 0),   # 6 numeric value
-        ("",         "w",     0,  0, 0),   # 7 hint
+        # heading,   anchor,   pad-left, pad-right, stretch
+        ("",         "w",       0,  6, 0),   # 0 CH number
+        ("dev",      "w",       0,  6, 0),   # 1 which gamepad
+        ("source",   "w",       0,  6, 0),   # 2 source
+        ("index",    "w",       0,  6, 0),   # 3 index
+        ("inv",      "center",  0,  6, 0),   # 4 invert
+        ("arm",      "center",  0,  8, 0),   # 5 counts as armed
+        ("steps",    "w",       0, 14, 0),   # 6 steps
+        ("value",    "w",       0,  8, 1),   # 7 bar
+        ("",         "e",       0, 10, 0),   # 8 numeric value
+        ("",         "w",       0,  0, 0),   # 9 hint
     )
 
     def _build_channels_tab(self, nb):
@@ -296,47 +308,67 @@ class App(tk.Tk):
             place(ttk.Label(grid, text=f"CH{i + 1}",
                             font=("TkDefaultFont", 9, "bold")), 0)
 
+            dev = tk.StringVar(value=str(chcfg.dev))
+            dev_combo = ttk.Combobox(grid, textvariable=dev, width=3,
+                                     state="readonly", values=("0", "1"))
+            place(dev_combo, 1)
+            dev_combo.bind("<<ComboboxSelected>>",
+                           lambda _e, n=i: self.on_channel_changed(n))
+
             src = tk.StringVar(value=chcfg.src)
             combo = ttk.Combobox(grid, textvariable=src, width=9,
                                  state="readonly", values=list(gp.SOURCES))
-            place(combo, 1)
+            place(combo, 2)
             combo.bind("<<ComboboxSelected>>",
                        lambda _e, n=i: self.on_channel_changed(n))
 
             idx = tk.StringVar(value=str(chcfg.idx))
             spin = ttk.Spinbox(grid, from_=0, to=31, width=5, textvariable=idx,
                                command=lambda n=i: self.on_channel_changed(n))
-            place(spin, 2)
+            place(spin, 3)
             spin.bind("<KeyRelease>", lambda _e, n=i: self.on_channel_changed(n))
 
             inv = tk.BooleanVar(value=chcfg.inv)
             place(ttk.Checkbutton(grid, variable=inv,
                                   command=lambda n=i: self.on_channel_changed(n)),
-                  3, sticky="")
+                  4, sticky="")
+
+            arm = tk.BooleanVar(value=chcfg.arm)
+            place(ttk.Checkbutton(grid, variable=arm,
+                                  command=lambda n=i: self.on_channel_changed(n)),
+                  5, sticky="")
 
             steps = tk.StringVar(value=str(chcfg.steps))
             steps_spin = ttk.Spinbox(grid, from_=2, to=6, width=4,
                                      textvariable=steps,
                                      command=lambda n=i: self.on_channel_changed(n))
-            place(steps_spin, 4)
+            place(steps_spin, 6)
 
             bar = ttk.Progressbar(grid, maximum=1000)
-            place(bar, 5, sticky="ew")
+            place(bar, 7, sticky="ew")
 
             val = ttk.Label(grid, text="—", anchor="e", width=14)
-            place(val, 6, sticky="e")
+            place(val, 8, sticky="e")
 
             place(ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
-                            foreground=self.pal["muted"]), 7)
+                            foreground=self.pal["muted"]), 9)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
-                                    "spin": spin, "steps_spin": steps_spin})
+                                    "spin": spin, "steps_spin": steps_spin,
+                                    "dev": dev, "arm": arm})
             self._sync_row_widgets(i)
 
         ttk.Label(tab, text="Mapping is one input to one channel. No mixing, no expo, "
                             "no curves — do all of that on the flight controller.",
                   foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 2))
+        ttk.Label(tab, foreground=self.pal["muted"], wraplength=900, justify="left",
+                  text="dev picks which gamepad a channel reads, for setups with a "
+                       "separate USB throttle. arm marks a channel as an arming "
+                       "channel: while it is high the app will not change module "
+                       "settings, and the ARM light is red. A toggle counts as an "
+                       "arm channel whether or not it is ticked.").pack(
+            anchor="w", padx=10, pady=(0, 2))
         self.src_help = ttk.Label(tab, text="", foreground=self.pal["faint"])
         self.src_help.pack(anchor="w", padx=10, pady=(0, 8))
 
@@ -349,16 +381,27 @@ class App(tk.Tk):
         frm = ttk.Frame(tab)
         frm.pack(fill="x", padx=12, pady=12)
 
-        ttk.Label(frm, text="Mode", width=14).grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Device", width=14).grid(row=0, column=0, sticky="w")
+        self.thr_dev = tk.StringVar(value=str(t.get("dev", 0)))
+        dev_combo = ttk.Combobox(frm, textvariable=self.thr_dev, width=10,
+                                 state="readonly", values=("0", "1"))
+        dev_combo.grid(row=0, column=1, sticky="w")
+        dev_combo.bind("<<ComboboxSelected>>", lambda _e: self.on_throttle_changed())
+        ttk.Label(frm, foreground=self.pal["muted"],
+                  text="which gamepad the throttle reads — pick Device 1 for a "
+                       "separate USB throttle").grid(row=0, column=2, columnspan=2,
+                                                     sticky="w", padx=8)
+
+        ttk.Label(frm, text="Mode", width=14).grid(row=1, column=0, sticky="w")
         self.thr_mode = tk.StringVar(value=t["mode"])
         mode_combo = ttk.Combobox(frm, textvariable=self.thr_mode, width=10,
                                   state="readonly", values=list(gp.THROTTLE_MODES))
-        mode_combo.grid(row=0, column=1, sticky="w")
+        mode_combo.grid(row=1, column=1, sticky="w")
         mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.on_throttle_changed())
 
         self.thr_help = ttk.Label(frm, text="", wraplength=620, justify="left",
                                   foreground=self.pal["faint"])
-        self.thr_help.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 14))
+        self.thr_help.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 14))
 
         def spin(label, key, row, lo, hi, hint=""):
             ttk.Label(frm, text=label, width=14).grid(row=row, column=0, sticky="w",
@@ -372,39 +415,39 @@ class App(tk.Tk):
                                                                  sticky="w", padx=8)
             return var
 
-        self.thr_axis = spin("Up / axis", "axis", 2, -1, 31,
+        self.thr_axis = spin("Up / axis", "axis", 3, -1, 31,
                              "axis or button that raises throttle (F710 X mode: RT = axis 5)")
-        self.thr_axis_dn = spin("Down", "axis_down", 3, -1, 31,
+        self.thr_axis_dn = spin("Down", "axis_down", 4, -1, 31,
                                 "ramp mode only (LT = axis 2)")
-        self.thr_cut = spin("Cut button", "cut_button", 4, -1, 31,
+        self.thr_cut = spin("Cut button", "cut_button", 5, -1, 31,
                             "instantly drops throttle to idle (Back = button 6)")
 
-        ttk.Label(frm, text="Ramp rate", width=14).grid(row=5, column=0, sticky="w",
+        ttk.Label(frm, text="Ramp rate", width=14).grid(row=6, column=0, sticky="w",
                                                         pady=3)
         self.thr_rate = tk.DoubleVar(value=t.get("ramp_rate", 0.6))
         ttk.Scale(frm, from_=0.1, to=2.0, variable=self.thr_rate, length=200,
                   command=lambda _v: self.on_throttle_changed()
-                  ).grid(row=5, column=1, columnspan=2, sticky="w", padx=(0, 8))
+                  ).grid(row=6, column=1, columnspan=2, sticky="w", padx=(0, 8))
         self.thr_rate_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
-        self.thr_rate_lbl.grid(row=5, column=3, sticky="w")
+        self.thr_rate_lbl.grid(row=6, column=3, sticky="w")
 
-        ttk.Label(frm, text="Deadzone", width=14).grid(row=6, column=0, sticky="w",
+        ttk.Label(frm, text="Deadzone", width=14).grid(row=7, column=0, sticky="w",
                                                        pady=3)
         self.thr_dz = tk.DoubleVar(value=t.get("deadzone", 0.06))
         ttk.Scale(frm, from_=0.0, to=0.3, variable=self.thr_dz, length=200,
                   command=lambda _v: self.on_throttle_changed()
-                  ).grid(row=6, column=1, columnspan=2, sticky="w", padx=(0, 8))
+                  ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(0, 8))
         self.thr_dz_lbl = ttk.Label(frm, text="", foreground=self.pal["muted"])
-        self.thr_dz_lbl.grid(row=6, column=3, sticky="w")
+        self.thr_dz_lbl.grid(row=7, column=3, sticky="w")
 
         # Stick deadzone lives on the Inputs tab now, per axis, next to the
         # live values it affects. A second slider here would appear to do
         # nothing once any axis had its own value.
-        ttk.Label(frm, text="Stick deadzone", width=14).grid(row=7, column=0,
+        ttk.Label(frm, text="Stick deadzone", width=14).grid(row=8, column=0,
                                                              sticky="w", pady=3)
         ttk.Label(frm, foreground=self.pal["muted"],
                   text="set per axis on the Inputs tab").grid(
-            row=7, column=1, columnspan=3, sticky="w")
+            row=8, column=1, columnspan=3, sticky="w")
 
         ttk.Label(tab, text="A link will not start unless throttle reads 0 %.",
                   foreground=self.pal["muted"]).pack(anchor="w", padx=12, pady=8)
@@ -418,9 +461,17 @@ class App(tk.Tk):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Inputs")
 
-        ttk.Label(tab, text="Live values straight from the gamepad — use this to "
-                            "find the axis and button numbers for the mapping.",
-                  foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 6))
+        head = ttk.Frame(tab)
+        head.pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Label(head, text="Live values straight from the gamepad — use this to "
+                             "find the axis and button numbers for the mapping.",
+                  foreground=self.pal["muted"]).pack(side="left")
+        ttk.Label(head, text="showing").pack(side="right", padx=(0, 4))
+        self.input_slot = tk.StringVar(value="0")
+        self.input_slot_combo = ttk.Combobox(head, textvariable=self.input_slot,
+                                             width=10, state="readonly",
+                                             values=("0",))
+        self.input_slot_combo.pack(side="right")
 
         self.axis_frame = ttk.LabelFrame(tab, text="Axes")
         self.axis_frame.pack(fill="x", padx=10, pady=4)
@@ -591,30 +642,67 @@ class App(tk.Tk):
                 return dev
         return None
 
-    def refresh_gamepads(self):
+    def refresh_gamepads(self, tries=6):
+        """SDL can take over a second to enumerate, longer with several
+        devices attached, so keep looking rather than reporting none."""
         self.gamepad.rescan()
-        self.after(300, self._fill_gamepads)
+        self.after(300, lambda: self._fill_gamepads(tries))
 
-    def _fill_gamepads(self):
+    NO_DEVICE = "none"
+
+    def _slot_widgets(self, slot):
+        return ((self.pad_combo, self.pad_var) if slot == 0
+                else (self.pad_combo_b, self.pad_var_b))
+
+    def _wanted_devices(self):
+        wanted = list(self.cfg.get("gamepads") or [0, None])
+        while len(wanted) < 2:
+            wanted.append(None)
+        return wanted
+
+    def _fill_gamepads(self, tries=1):
         devices = self.gamepad.devices
-        self.pad_combo["values"] = [f"{i}: {n}" for i, n in enumerate(devices)]
-        if devices:
-            idx = min(self.cfg.get("gamepad_index", 0), len(devices) - 1)
-            self.pad_combo.current(idx)
-            self.gamepad.select(idx)
-            self.log("info", f"Gamepad selected: {devices[idx]}")
-        else:
-            self.pad_var.set("")
+        if not devices and tries > 1:
+            self.after(400, lambda: self._fill_gamepads(tries - 1))
+            return
+        listing = [self.NO_DEVICE] + [f"{i}: {n}" for i, n in enumerate(devices)]
+        wanted = self._wanted_devices()
+
+        for slot in (0, 1):
+            combo, var = self._slot_widgets(slot)
+            combo["values"] = listing
+            index = wanted[slot]
+            if index is not None and index >= len(devices):
+                self.log("warn", f"Device {index} is not connected, so slot "
+                                 f"{slot} was left empty.")
+                index = None
+            if index is None:
+                var.set(self.NO_DEVICE)
+                self.gamepad.select(None, slot)
+            else:
+                var.set(listing[index + 1])
+                self.gamepad.select(index, slot)
+                self.log("info", f"Slot {slot}: {devices[index]}")
+            wanted[slot] = index
+        self.cfg["gamepads"] = wanted
+        self._refresh_input_slots()
+
+        if not devices:
             self.log("warn", "No gamepad detected. Check the F710 dongle and the "
                              "X/D switch (use X).")
 
-    def on_pad_selected(self, _evt=None):
-        label = self.pad_var.get()
-        if not label:
-            return
-        idx = int(label.split(":", 1)[0])
-        self.cfg["gamepad_index"] = idx
-        self.gamepad.select(idx)
+    def on_pad_selected(self, slot=0):
+        _combo, var = self._slot_widgets(slot)
+        label = var.get()
+        wanted = self._wanted_devices()
+        if not label or label == self.NO_DEVICE:
+            wanted[slot] = None
+            self.gamepad.select(None, slot)
+        else:
+            wanted[slot] = int(label.split(":", 1)[0])
+            self.gamepad.select(wanted[slot], slot)
+        self.cfg["gamepads"] = wanted
+        self._refresh_input_slots()
 
     NO_INDEX = "none"
 
@@ -650,6 +738,8 @@ class App(tk.Tk):
             raw = str(w["idx"].get()).strip().lower()
             ch.idx = 0 if raw in ("", self.NO_INDEX) else int(raw)
             ch.inv = bool(w["inv"].get())
+            ch.dev = int(w["dev"].get())
+            ch.arm = bool(w["arm"].get())
             raw_steps = str(w["steps"].get()).strip().lower()
             if raw_steps not in ("", self.NO_INDEX):
                 ch.steps = max(2, min(6, int(raw_steps)))
@@ -667,6 +757,8 @@ class App(tk.Tk):
             t["axis_down"] = int(self.thr_axis_dn.get())
             t["cut_button"] = int(self.thr_cut.get())
             t["ramp_rate"] = round(float(self.thr_rate.get()), 2)
+            t["dev"] = int(self.thr_dev.get())
+            self.mixer.throttle_dev = t["dev"]
             t["deadzone"] = round(float(self.thr_dz.get()), 3)
         except (tk.TclError, ValueError):
             return
@@ -687,16 +779,22 @@ class App(tk.Tk):
                                                    "ExpressLRS module is on.")
             return
 
-        state = self.gamepad.state
-        if not state.is_fresh():
-            messagebox.showerror("No gamepad", "No live gamepad data. Select a "
-                                               "gamepad and move a stick to confirm "
-                                               "it is reporting.")
-            return
+        # Every device the map reads has to be reporting before we start,
+        # not just the first one.
+        states = self.gamepad.states
+        for slot in sorted(self.mixer.required_devices()):
+            st = states.get(slot)
+            if st is None or not st.is_fresh():
+                where = "gamepad" if slot == 0 else f"device {slot}"
+                messagebox.showerror(
+                    "No input", f"No live data from {where}. Select it in the "
+                                f"toolbar and move a control to confirm it is "
+                                f"reporting.")
+                return
 
         # safety: reset every latch, then verify the throttle really is at idle
         self.mixer.reset()
-        values = self.mixer.compute(state)
+        values = self.mixer.compute(states)
         thr_channels = [i for i, c in enumerate(self.mixer.channels)
                         if c.src == "throttle"]
         for i in thr_channels:
@@ -1181,7 +1279,27 @@ class App(tk.Tk):
                 state.device_name if state.connected else "no gamepad")
             self.status_var.set(f"idle   |   input: {src}")
 
-        self._update_inputs(state)
+        self._update_inputs(self._shown_input_state(state))
+
+    def _shown_input_state(self, fallback):
+        """Whichever device slot the Inputs tab is set to show."""
+        try:
+            slot = int(self.input_slot.get())
+        except (tk.TclError, ValueError):
+            return fallback
+        if slot == 0:
+            return fallback
+        return self.gamepad.state_for(slot)
+
+    def _refresh_input_slots(self):
+        """Offer only the slots that actually have a device in them."""
+        if not hasattr(self, "input_slot_combo"):
+            return
+        wanted = self._wanted_devices()
+        slots = [str(i) for i, index in enumerate(wanted) if index is not None] or ["0"]
+        self.input_slot_combo["values"] = slots
+        if self.input_slot.get() not in slots:
+            self.input_slot.set(slots[0])
 
     def _update_inputs(self, state):
         for i, w in enumerate(self.axis_widgets):
@@ -1299,9 +1417,12 @@ class App(tk.Tk):
             ch = self.mixer.channels[i]
             w["src"].set(ch.src)
             w["inv"].set(ch.inv)
+            w["dev"].set(str(ch.dev))
+            w["arm"].set(ch.arm)
             self._sync_row_widgets(i)
         t = self.cfg["throttle"]
         self.thr_mode.set(t["mode"])
+        self.thr_dev.set(str(t.get("dev", 0)))
         self.thr_axis.set(t["axis"])
         self.thr_axis_dn.set(t["axis_down"])
         self.thr_cut.set(t["cut_button"])
