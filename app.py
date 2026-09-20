@@ -31,6 +31,9 @@ REFRESH_MS = 50          # GUI refresh, 20 Hz
 BAR_LEN = 150
 
 
+VERSION = "1.0.0"
+
+
 def fmt_channel(value: int) -> str:
     return f"{value:4d}  ({crsf.crsf_to_us(value):.0f}\u00b5s)"
 
@@ -76,6 +79,7 @@ class App(tk.Tk):
 
         self.bind("<Escape>", lambda _e: self.stop_link(reason="Esc pressed"))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._set_window_icon()
 
         self._maximize()
         self.refresh_ports()
@@ -142,6 +146,27 @@ class App(tk.Tk):
     LOGO_MARGIN = 3         # breathing room above and below
     LOGO_MIN = 24           # below this it is not worth drawing
 
+    ICON_FILE = "mavjoy.ico"
+
+    def _set_window_icon(self):
+        """Put the logo on the window and the taskbar.
+
+        Two goes at it: Windows wants a real .ico for the title bar and the
+        taskbar, and everywhere else takes a PhotoImage. Neither is worth
+        failing to start over, so both are allowed to fail quietly.
+        """
+        try:
+            self.iconbitmap(configmod.asset_path(self.ICON_FILE))
+            return
+        except Exception:
+            pass
+        try:
+            self._icon_img = tk.PhotoImage(
+                file=configmod.asset_path(self.LOGO_FILE))
+            self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
+
     def _load_logo(self, target_px):
         """The logo, scaled to about target_px tall, or None if it is absent.
 
@@ -149,8 +174,7 @@ class App(tk.Tk):
         target rather than on it. A missing or unreadable file is not an
         error: this is decoration, and the app has to start without it.
         """
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            self.LOGO_FILE)
+        path = configmod.asset_path(self.LOGO_FILE)
         try:
             img = tk.PhotoImage(file=path)
         except Exception:
@@ -2061,6 +2085,7 @@ class App(tk.Tk):
     def show_about(self):
         messagebox.showinfo(
             "About",
+            f"MavJOY {VERSION}\n"
             "F710 \u2192 CRSF \u2192 ExpressLRS\n\n"
             "Sends CRSF RC frames to an ExpressLRS TX module over a serial port, "
             "so the module behaves exactly as if a handset were driving it.\n\n"

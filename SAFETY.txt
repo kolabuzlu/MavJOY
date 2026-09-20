@@ -1,0 +1,57 @@
+MavJOY 1.0.0
+============
+
+MavJOY turns a USB gamepad into an RC transmitter. It drives a real
+aircraft. Read this before the first flight.
+
+
+BEFORE POWERING THE MODULE
+
+  * Fit the antenna first. Powering a 1 W transmitter without one can
+    destroy its output stage.
+  * Do not feed the module's XT30 from 3S or above.
+  * Do all bench testing with the propellers OFF.
+
+
+THE FAILSAFE IS ON THE AIRCRAFT, NOT HERE
+
+  If channel data stops - gamepad unplugged, app closed, Esc pressed -
+  MavJOY stops writing frames entirely. The module's UART watchdog then
+  drops the RF link and your receiver falls into its own failsafe.
+
+  That receiver failsafe is the real failsafe. Set it up in ArduPilot,
+  Betaflight or INAV and test it on the bench, props off, before flying.
+
+
+WHEN THE LINK COMES BACK
+
+  Recovery does not hand control back on its own. Every switch channel
+  (CH5-16) is frozen at the value the model last actually received, and
+  stays frozen until you move that control. Anything you moved during the
+  outage never reached the model, so letting it take effect the moment the
+  link returns would pull the model out of the failsafe it is holding.
+
+  CH1-4 are never frozen. Roll, pitch, throttle and yaw answer the sticks
+  the instant the link is back.
+
+
+ARMING
+
+  CH5 is the arm channel. Always, and nothing else is. While it reads high
+  MavJOY refuses to change module settings.
+
+  The ARM banner shows what the AIRCRAFT reports, not what CH5 is doing.
+  CRSF has no armed frame, so this is read from a star appended to the
+  flight mode name while disarmed. On ArduPilot, set RC_OPTIONS bit 12
+  (add 4096) or the banner has nothing to read and stays grey.
+
+
+FILES
+
+  MavJOY.exe writes config.json beside itself. Keep them together. That
+  file holds your port, mapping, output endpoints and the latch positions
+  carried over from the last run.
+
+
+Source, issues and full documentation:
+  https://github.com/kolabuzlu/MavJOY

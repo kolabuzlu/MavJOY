@@ -28,10 +28,38 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 
 import crsf
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+def base_dir():
+    """Where the app keeps the files it writes.
+
+    Frozen by PyInstaller, __file__ points inside a temporary directory
+    that is deleted when the app exits, so a config written there would be
+    thrown away every single time - taking the port, the mapping and the
+    remembered latch positions with it. Beside the executable is what a
+    build you unzip and run expects.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def asset_path(name):
+    """Where a file shipped with the app lives.
+
+    The opposite case: PyInstaller unpacks bundled data into _MEIPASS, so
+    read-only assets come from there when frozen and from the source tree
+    otherwise.
+    """
+    root = getattr(sys, "_MEIPASS", None)
+    if root:
+        return os.path.join(root, name)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+
+
+CONFIG_PATH = os.path.join(base_dir(), "config.json")
 
 DEFAULT_CONFIG = {
     "port": "",

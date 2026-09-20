@@ -21,3 +21,9 @@ Thumbs.db
 # repo stays free of third-party copyleft. To ship it, move it to
 # third_party/ with its licence and drop this line.
 elrs.lua
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+MavJOY-*.zip
