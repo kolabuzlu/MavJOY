@@ -36,12 +36,11 @@ ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
 # a wordmark is illegible at 32 px, but inside the app the full lockup is
 # what belongs there.
 #
-# They are made here because Tk can only resample by whole-number decimation
-# - it takes every Nth pixel and throws the rest away. On the wordmark,
-# whose strokes are about twenty pixels wide in a source reduced twentyfold,
-# that means each stroke either survives whole or vanishes. It is what made
-# this look soft in the window while the same artwork was sharp on the
-# desktop, where Windows scales the .ico properly.
+# They are made here rather than in the app because Tk can only resample by
+# whole-number decimation - it takes every Nth pixel and throws the rest
+# away. On the wordmark, whose strokes are about twenty pixels wide in a
+# source reduced twentyfold, that means each stroke either survives whole or
+# vanishes. These are a plain resize of the original and nothing else.
 LOGO_SIZES = [48, 64, 80, 96, 128]
 LOGO_PATTERN = "mavjoy_lockup_%d.png"
 
@@ -160,9 +159,13 @@ def main():
           f"{len(ICO_SIZES)} sizes")
 
     # The window's copies come from the source as drawn, black background
-    # and all - not from the cropped artwork above.
+    # and all - not from the cropped artwork above, and NOT sharpened. The
+    # icon is sharpened because it is reduced to 32 px and needs the help;
+    # the logo in the window is the original file resized and nothing else,
+    # because anything more shows as an edit of artwork nobody asked to
+    # have edited.
     for n in LOGO_SIZES:
-        scaled(im, n).convert("RGB").save(LOGO_PATTERN % n)
+        im.resize((n, n), Image.Resampling.LANCZOS)           .convert("RGB").save(LOGO_PATTERN % n)
     print("wrote " + ", ".join(LOGO_PATTERN % n for n in LOGO_SIZES))
     return 0
 
