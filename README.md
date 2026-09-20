@@ -120,6 +120,41 @@ The F710's sticks self-centre, which is why throttle gets its own engine:
 
 ---
 
+## Module settings
+
+The **Module** tab is a full settings editor: everything the EdgeTX Lua
+script can show or change, MavJOY can too. It walks the module's parameter
+list over CRSF, folders and all, and builds the page from what comes back —
+nothing is hardcoded, so whatever your firmware exposes is what you see.
+
+On a BFPV 2G4Micro1W running ELRS 4.1 that is 21 fields, read in about a
+second:
+
+```
+Packet Rate, Telem Ratio, Switch Mode, Link Mode, Model Match
+TX Power/        Max Power, Dynamic, Fan Thresh
+VTX Administrator/ Band/Enable, Channel, Pwr Lvl, Pitmode, Send VTx
+WiFi Connectivity/ Enable WiFi, Enable Rx WiFi
+BLE Joystick, Bind, 4.1.0 ISM2G4
+```
+
+Dropdowns for selections, spin boxes for numbers, buttons for commands,
+and folders grouped the way the module reports them. **show hidden** reveals
+the fields ExpressLRS marks hidden, such as the VTX channel and pit mode.
+
+After any change the whole list is re-read, because ExpressLRS adjusts other
+fields in response — change the packet rate and the telemetry ratio's
+available options move with it.
+
+Three safety rules apply. Nothing is written while a latch says the model is
+armed. Commands ask first. And **Enable WiFi**, **Enable Rx WiFi**, **BLE
+Joystick** and **Bind** take the module off the air, so the CRSF link stops
+and has to be started again — the app says so before running them.
+
+ExpressLRS refuses settings it considers invalid for the current
+configuration rather than reporting an error, so the app always shows what
+the module says it is on, not what was asked for.
+
 ## Two different rates
 
 These get confused constantly, so plainly:

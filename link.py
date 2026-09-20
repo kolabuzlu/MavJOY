@@ -100,8 +100,9 @@ class _ParamJob:
     # the write still reported the previous rate; 2.5 s reported the new one.
     WRITE_SETTLE = 1.2
 
-    def __init__(self, kind, index=None, value=None, on_done=None):
+    def __init__(self, kind, index=None, value=None, on_done=None, settle=None):
         self.kind = kind
+        self.settle = self.WRITE_SETTLE if settle is None else settle
         self.stage = kind
         self.index = index
         self.value = value
@@ -118,7 +119,7 @@ class _ParamJob:
         if self.stage == "write":
             if not self._wrote:
                 self._wrote = True
-                self._settle_until = time.monotonic() + self.WRITE_SETTLE
+                self._settle_until = time.monotonic() + self.settle
                 return crsf.param_write_frame(self.index, self.value)
             if time.monotonic() < self._settle_until:
                 return None     # let the module apply and save first
@@ -201,14 +202,18 @@ class CrsfLink(threading.Thread):
         with self._lock:
             return dict(self.telemetry), self.stats
 
-    def submit(self, kind, index=None, value=None, on_done=None):
+    def submit(self, kind, index=None, value=None, on_done=None, settle=None):
         """Queue a settings operation. `on_done(result, error)` is called on
         the link thread, so a GUI must marshal it back to its own thread.
 
         kind is "ping" (-> device info dict), "read" (-> ParamField) or
         "write" (-> ParamField, re-read after the write to confirm it took).
+
+        `settle` overrides how long to wait between writing and reading back.
+        Settings need the default; command fields answer at once, so they
+        pass something short to keep the UI responsive.
         """
-        self._jobs.put(_ParamJob(kind, index, value, on_done))
+        self._jobs.put(_ParamJob(kind, index, value, on_done, settle))
 
     def busy(self):
         return self._job is not None or not self._jobs.empty()

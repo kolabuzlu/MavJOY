@@ -277,6 +277,8 @@ FRAMETYPE_PARAMETER_READ = 0x2C
 FRAMETYPE_PARAMETER_WRITE = 0x2D
 
 PARAM_UINT8 = 0
+PARAM_INT8 = 1
+PARAM_FLOAT = 8
 PARAM_SELECT = 9
 PARAM_STRING = 10
 PARAM_FOLDER = 11
@@ -285,8 +287,30 @@ PARAM_COMMAND = 13
 
 PARAM_TYPE_NAMES = {
     0: "uint8", 1: "int8", 2: "uint16", 3: "int16", 4: "uint32", 5: "int32",
-    6: "float", 9: "select", 10: "string", 11: "folder", 12: "info",
-    13: "command",
+    6: "uint64", 7: "int64", 8: "float", 9: "select", 10: "string",
+    11: "folder", 12: "info", 13: "command",
+}
+
+# Width and signedness of the numeric types, for value/min/max/default.
+_NUMERIC = {
+    0: (1, False), 1: (1, True), 2: (2, False), 3: (2, True),
+    4: (4, False), 5: (4, True), 8: (4, True),
+}
+
+# Command fields step through these. Writing START runs the command; the
+# module then reports PROGRESS until it finishes, or CONFIRMATION_NEEDED if
+# it wants a yes first.
+CMD_READY = 0
+CMD_START = 1
+CMD_PROGRESS = 2
+CMD_CONFIRMATION_NEEDED = 3
+CMD_CONFIRM = 4
+CMD_CANCEL = 5
+CMD_POLL = 6
+
+CMD_STATUS_NAMES = {
+    0: "ready", 1: "start", 2: "running", 3: "confirm?",
+    4: "confirmed", 5: "cancelled", 6: "poll",
 }
 
 
@@ -343,7 +367,8 @@ class ParamField:
     """One entry from the module's settings list."""
 
     __slots__ = ("index", "parent", "type", "hidden", "name", "options",
-                 "value", "vmin", "vmax", "unit")
+                 "value", "vmin", "vmax", "vdefault", "unit", "children",
+                 "status", "timeout", "info", "text")
 
     def __init__(self, index, parent, ftype, hidden, name, options=None,
                  value=None, vmin=None, vmax=None, unit=""):
@@ -356,7 +381,30 @@ class ParamField:
         self.value = value
         self.vmin = vmin
         self.vmax = vmax
+        self.vdefault = None
         self.unit = unit
+        self.children = []      # folders: the field ids they contain
+        self.status = None      # commands: CMD_* state
+        self.timeout = 0        # commands: how long to allow, in 10 ms units
+        self.info = ""          # commands: prompt or progress text
+        self.text = ""          # info/string fields: the value shown
+
+    @property
+    def editable(self):
+        return self.type in _NUMERIC or self.type in (PARAM_SELECT, PARAM_STRING)
+
+    @property
+    def display(self):
+        """What to show as this field's current value."""
+        if self.type == PARAM_SELECT:
+            return f"{self.current_label} {self.unit}".strip()
+        if self.type in (PARAM_INFO, PARAM_STRING):
+            return self.text
+        if self.type == PARAM_COMMAND:
+            return CMD_STATUS_NAMES.get(self.status, "")
+        if self.value is not None:
+            return f"{self.value} {self.unit}".strip()
+        return ""
 
     @property
     def type_name(self):
@@ -387,11 +435,42 @@ class ParamField:
                 f"value={self.value})")
 
 
+# EdgeTX packs a couple of its own glyphs into option labels; 0xC0 and 0xC1
+# are the up and down arrows used for "AUX1 high / AUX1 low".
+_GLYPHS = {0xC0: "↑", 0xC1: "↓"}
+
+
+def _decode_text(raw: bytes) -> str:
+    out = []
+    for b in raw:
+        if b in _GLYPHS:
+            out.append(_GLYPHS[b])
+        elif 32 <= b < 127:
+            out.append(chr(b))
+        elif b >= 160:
+            out.append(chr(b))       # latin-1 passthrough
+    return "".join(out)
+
+
+def _raw_cstr(buf: bytes, i: int):
+    """Like _cstr but returns the raw bytes, so glyphs survive."""
+    end = buf.index(b"\x00", i)
+    return buf[i:end], end + 1
+
+
 def parse_param_entry(index: int, body: bytes):
     """Turn a fully assembled PARAMETER_SETTINGS_ENTRY body into a ParamField.
 
     `body` is the concatenation of every chunk's payload, with the leading
     dest/origin/index/chunks_remaining header of each chunk already stripped.
+    Layout after the name is decided by the type:
+
+        numeric   value, min, max, default (each 1-4 bytes), then a unit
+        select    "a;b;c", value, min, max, default, then a unit
+        string    the text
+        folder    the ids of the fields it contains, terminated by 0xFF
+        info      the text to display
+        command   status, timeout (10 ms units), prompt text
     """
     if len(body) < 3:
         return None
@@ -400,35 +479,62 @@ def parse_param_entry(index: int, body: bytes):
     ftype = raw_type & 0x7F
     hidden = bool(raw_type & 0x80)
     try:
-        name, i = _cstr(body, 2)
+        name_raw, i = _raw_cstr(body, 2)
     except ValueError:
         return None
 
-    field = ParamField(index, parent, ftype, hidden, name)
-    if ftype == PARAM_SELECT:
-        try:
-            opts, i = _cstr(body, i)
-            field.options = opts.split(";")
-            field.value = body[i]
-            field.vmin = body[i + 1]
-            field.vmax = body[i + 2]
-            # default byte follows, then an optional unit string
+    field = ParamField(index, parent, ftype, hidden, _decode_text(name_raw))
+
+    try:
+        if ftype == PARAM_SELECT:
+            opts_raw, i = _raw_cstr(body, i)
+            field.options = [_decode_text(o) for o in opts_raw.split(b";")]
+            field.value, field.vmin = body[i], body[i + 1]
+            field.vmax, field.vdefault = body[i + 2], body[i + 3]
             try:
-                field.unit, _ = _cstr(body, i + 4)
+                unit_raw, _ = _raw_cstr(body, i + 4)
+                field.unit = _decode_text(unit_raw)
             except (ValueError, IndexError):
                 field.unit = ""
-        except (ValueError, IndexError):
-            return field
-    elif ftype == PARAM_UINT8:
-        try:
-            field.value, field.vmin, field.vmax = body[i], body[i + 1], body[i + 2]
-        except IndexError:
-            pass
-    elif ftype in (PARAM_STRING, PARAM_INFO):
-        try:
-            field.unit, _ = _cstr(body, i)
-        except ValueError:
-            pass
+
+        elif ftype in _NUMERIC:
+            width, signed = _NUMERIC[ftype]
+
+            def take(pos):
+                return int.from_bytes(body[pos:pos + width], "big", signed=signed)
+
+            field.value = take(i)
+            field.vmin = take(i + width)
+            field.vmax = take(i + 2 * width)
+            field.vdefault = take(i + 3 * width)
+            try:
+                unit_raw, _ = _raw_cstr(body, i + 4 * width)
+                field.unit = _decode_text(unit_raw)
+            except (ValueError, IndexError):
+                field.unit = ""
+
+        elif ftype in (PARAM_STRING, PARAM_INFO):
+            text_raw, _ = _raw_cstr(body, i)
+            field.text = _decode_text(text_raw)
+
+        elif ftype == PARAM_FOLDER:
+            # ids of the fields inside, terminated by 0xFF
+            for b in body[i:]:
+                if b == 0xFF:
+                    break
+                field.children.append(b)
+
+        elif ftype == PARAM_COMMAND:
+            field.status = body[i]
+            field.timeout = body[i + 1]
+            try:
+                info_raw, _ = _raw_cstr(body, i + 2)
+                field.info = _decode_text(info_raw)
+            except (ValueError, IndexError):
+                field.info = ""
+    except (ValueError, IndexError):
+        pass    # a short or odd entry is still worth showing by name
+
     return field
 
 

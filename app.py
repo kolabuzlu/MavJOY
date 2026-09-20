@@ -46,9 +46,9 @@ class App(tk.Tk):
         self._log_lines = 0
         self._ports = []
         self._module_q = queue.Queue()      # settings replies, link thread -> GUI
-        self._module_scan = None            # index being probed during a scan
-        self._rate_field = None             # the module's Packet Rate field
-        self._rate_pending = None           # value we asked the module to take
+        self._fields = {}                   # index -> ParamField from the module
+        self._field_vars = {}               # index -> the tk var editing it
+        self._cmd_index = None              # command currently running
         self._device = None                 # DEVICE_INFO from the module
 
         self.gamepad = (gp.SimGamepadThread() if simulate else gp.GamepadThread())
@@ -193,39 +193,33 @@ class App(tk.Tk):
         self.module_btn = ttk.Button(head, text="Read from module",
                                      command=self.read_module_settings)
         self.module_btn.pack(side="right")
+        self.module_hidden = tk.BooleanVar(value=False)
+        ttk.Checkbutton(head, text="show hidden", variable=self.module_hidden,
+                        command=self._render_fields).pack(side="right", padx=8)
 
         self.module_info_lbl = ttk.Label(
             tab, foreground="#777777",
             text="Start the link, then read the settings from the module.")
-        self.module_info_lbl.pack(anchor="w", padx=10, pady=(0, 8))
+        self.module_info_lbl.pack(anchor="w", padx=10, pady=(0, 6))
 
-        frm = ttk.LabelFrame(tab, text="RF packet rate")
-        frm.pack(fill="x", padx=10, pady=4)
-
-        ttk.Label(frm, wraplength=900, justify="left", foreground="#555555",
-                  text="How fast the module transmits over the air. This lives "
-                       "inside the module, and it is NOT the CRSF Hz box in the "
-                       "toolbar — that one only sets how often this PC hands "
-                       "frames to the module over USB. Sending CRSF faster will "
-                       "never change the rate shown here.").pack(
-            anchor="w", padx=10, pady=(8, 6))
-
-        row = ttk.Frame(frm)
-        row.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Label(row, text="Packet rate", width=14).pack(side="left")
-        self.rf_rate_var = tk.StringVar()
-        self.rf_rate_combo = ttk.Combobox(row, textvariable=self.rf_rate_var,
-                                          width=26, state="disabled")
-        self.rf_rate_combo.pack(side="left", padx=4)
-        self.rf_rate_combo.bind("<<ComboboxSelected>>", self.on_rf_rate_selected)
-        self.rf_rate_lbl = ttk.Label(row, text="", foreground="#777777")
-        self.rf_rate_lbl.pack(side="left", padx=8)
-
-        ttk.Label(frm, wraplength=900, justify="left", foreground="#b36b00",
-                  text="Changing this re-keys the RF link: the receiver drops "
-                       "out and failsafes for a moment while both ends resync. "
-                       "Never do it in flight. The app refuses while armed.").pack(
-            anchor="w", padx=10, pady=(0, 10))
+        # Everything the module exposes, in its own folder structure - the
+        # same list the EdgeTX Lua script walks.
+        wrap = ttk.Frame(tab)
+        wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        canvas = tk.Canvas(wrap, highlightthickness=0, borderwidth=0)
+        bar = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        self.module_body = ttk.Frame(canvas)
+        self.module_body.bind(
+            "<Configure>",
+            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.module_body, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        canvas.bind_all(
+            "<MouseWheel>",
+            lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        self._render_fields()
 
     # ------------------------------------------------------------ channels
     def _build_channels_tab(self, nb):
@@ -599,14 +593,19 @@ class App(tk.Tk):
                              f"wants. Raise the baud to 921600 for more headroom.")
 
     # ---------------------------------------------------- module settings
+    # Commands that take the module off the air. Bind re-pairs it; WiFi and
+    # BLE swap the radio out from under CRSF entirely, so the link stops.
+    DISRUPTIVE = ("wifi", "ble", "bind")
+
     def read_module_settings(self):
-        """Ask the module what it is, then hunt down its Packet Rate field."""
+        """Read the whole settings tree, the way the Lua script does."""
         if not (self.link and self.link.running):
-            messagebox.showinfo("Link not running",
-                                "Start the link first. Module settings travel "
-                                "over the same serial connection as the "
-                                "channel data.")
+            messagebox.showinfo(
+                "Link not running",
+                "Start the link first. Module settings travel over the same "
+                "serial connection as the channel data.")
             return
+        self._fields = {}
         self.module_btn.config(state="disabled")
         self.module_info_lbl.config(text="asking the module to identify itself...")
         self.link.submit("ping", on_done=self._module_cb("ping"))
@@ -615,108 +614,230 @@ class App(tk.Tk):
         """Callbacks fire on the link thread; hand them to the GUI thread."""
         return lambda result, error: self._module_q.put((tag, result, error))
 
+    def _request_field(self, index):
+        total = (self._device or {}).get("field_count", 0)
+        self.module_info_lbl.config(text=f"reading settings {index}/{total} ...")
+        self.link.submit("read", index=index, on_done=self._module_cb("field"))
+
+    def _finish_scan(self):
+        dev = self._device or {}
+        name = dev.get("name", "module")
+        version = dev.get("version", "?")
+        self.module_info_lbl.config(
+            text=f"{name}  -  ExpressLRS {version}  -  {len(self._fields)} settings")
+        self.module_btn.config(state="normal")
+        self._render_fields()
+
     def _poll_module(self):
         while True:
             try:
                 tag, result, error = self._module_q.get_nowait()
             except queue.Empty:
                 return
+            if self.link is None or not self.link.running:
+                self.module_btn.config(state="normal")
+                continue
             if error or result is None:
                 self.module_info_lbl.config(
                     text=f"module did not answer ({error or 'no data'})")
                 self.module_btn.config(state="normal")
-                if self._rate_field is not None:
-                    self.rf_rate_combo.config(state="readonly")
                 self.log("warn", f"Module settings: {error or 'no data'}")
                 continue
-            if self.link is None or not self.link.running:
-                self.module_btn.config(state="normal")
-                continue
+
             if tag == "ping":
                 self._device = result
-                self.module_info_lbl.config(
-                    text=f"{result['name']}  •  ExpressLRS {result['version']}"
-                         f"  •  {result['field_count']} settings")
-                self._module_scan = 1
-                self.link.submit("read", index=1, on_done=self._module_cb("field"))
+                self._request_field(1)
             elif tag == "field":
-                self._on_module_field(result)
+                self._fields[result.index] = result
+                nxt = result.index + 1
+                if nxt <= (self._device or {}).get("field_count", 0):
+                    self._request_field(nxt)
+                else:
+                    self._finish_scan()
+            elif tag == "written":
+                self._after_write(result)
+            elif tag == "cmd":
+                self._command_reply(result)
 
-    def _on_module_field(self, field):
-        if "packet rate" in field.name.lower():
-            refused = (self._rate_pending is not None
-                       and field.value != self._rate_pending)
-            wanted = (field.label_for(self._rate_pending)
-                      if self._rate_pending is not None else "")
-            self._rate_pending = None
-            self._rate_field = field
-            self.rf_rate_combo["values"] = [label for _v, label in field.choices()]
-            self.rf_rate_combo.config(state="readonly")
-            self.rf_rate_var.set(field.current_label)
-            self.rf_rate_lbl.config(text=f"reported by the module")
-            self.module_btn.config(state="normal")
-            self.module_info_lbl.config(
-                text=f"{(self._device or {}).get('name', 'module')}  •  "
-                     f"ExpressLRS {(self._device or {}).get('version', '?')}"
-                     f"  •  packet rate {field.current_label}")
-            if refused:
-                self.log("warn", f"The module refused {wanted} and stayed on "
-                                 f"{field.current_label}. ExpressLRS rejects some "
-                                 f"rates depending on telemetry ratio and switch "
-                                 f"mode.")
-                messagebox.showwarning(
-                    "Rate refused",
-                    f"The module would not take {wanted} and is still on "
-                    f"{field.current_label}. ExpressLRS blocks some rates "
-                    f"depending on the telemetry ratio and switch mode.")
-            else:
-                self.log("info", f"Module packet rate: {field.current_label}")
+    # ------------------------------------------------------------ drawing
+    def _render_fields(self):
+        if not hasattr(self, "module_body"):
+            return
+        for child in self.module_body.winfo_children():
+            child.destroy()
+        self._field_vars = {}
+        self._row = 0
+        if not self._fields:
+            ttk.Label(self.module_body, foreground="#777777",
+                      text="Nothing read yet.").grid(row=0, column=0,
+                                                     sticky="w", padx=12, pady=6)
+            return
+        for idx in sorted(self._fields):
+            if self._fields[idx].parent == 0:
+                self._render_field(idx, 0)
+
+    def _render_field(self, index, depth):
+        field = self._fields.get(index)
+        if field is None:
+            return
+        if field.hidden and not self.module_hidden.get():
             return
 
-        # Not it. Packet Rate is field 1 on current firmware, but walk the
-        # list rather than trusting that, in case the layout ever moves.
-        nxt = (self._module_scan or 1) + 1
-        limit = (self._device or {}).get("field_count", 0)
-        if nxt > limit or self.link is None:
-            self.module_info_lbl.config(text="this module has no Packet Rate setting")
-            self.module_btn.config(state="normal")
-            return
-        self._module_scan = nxt
-        self.link.submit("read", index=nxt, on_done=self._module_cb("field"))
+        body = self.module_body
+        row = self._row
+        self._row += 1
+        indent = 12 + depth * 18
 
-    def on_rf_rate_selected(self, _evt=None):
-        field = self._rate_field
-        if field is None or not (self.link and self.link.running):
-            return
-        label = self.rf_rate_var.get()
-        value = next((v for v, l in field.choices() if l == label), None)
-        if value is None or value == field.value:
+        label = ttk.Label(body, text=field.name, width=22, anchor="w")
+        label.grid(row=row, column=0, sticky="w", padx=(indent, 8), pady=2)
+
+        if field.type == crsf.PARAM_FOLDER:
+            label.config(font=("TkDefaultFont", 9, "bold"))
+            for child in field.children:
+                self._render_field(child, depth + 1)
             return
 
+        if field.type == crsf.PARAM_SELECT:
+            var = tk.StringVar(value=field.current_label)
+            combo = ttk.Combobox(body, textvariable=var, state="readonly",
+                                 width=24,
+                                 values=[lab for _v, lab in field.choices()])
+            combo.grid(row=row, column=1, sticky="w")
+            combo.bind("<<ComboboxSelected>>",
+                       lambda _e, i=index: self._on_select_changed(i))
+            self._field_vars[index] = var
+
+        elif field.type in crsf._NUMERIC:
+            var = tk.StringVar(value=str(field.value))
+            spin = ttk.Spinbox(body, from_=field.vmin, to=field.vmax, width=10,
+                               textvariable=var)
+            spin.grid(row=row, column=1, sticky="w")
+            spin.configure(command=lambda i=index: self._on_number_changed(i))
+            spin.bind("<Return>", lambda _e, i=index: self._on_number_changed(i))
+            spin.bind("<FocusOut>", lambda _e, i=index: self._on_number_changed(i))
+            self._field_vars[index] = var
+
+        elif field.type == crsf.PARAM_COMMAND:
+            ttk.Button(body, text="Run", width=10,
+                       command=lambda i=index: self.run_command(i)).grid(
+                row=row, column=1, sticky="w")
+
+        else:
+            ttk.Label(body, text=field.display, width=26, anchor="w").grid(
+                row=row, column=1, sticky="w")
+
+        if field.unit and field.type != crsf.PARAM_SELECT:
+            ttk.Label(body, text=field.unit, foreground="#777777").grid(
+                row=row, column=2, sticky="w", padx=6)
+
+    # ------------------------------------------------------------ editing
+    def _may_write(self, what):
+        """Nothing reaches the module while a latch says the model is armed."""
         armed = self.mixer.armed_channels()
         if armed:
             messagebox.showwarning(
                 "Armed",
-                f"CH{armed[0]} is armed.\n\nDisarm before changing "
-                f"the packet rate - the RF link drops while both ends "
-                f"resync.")
-            self.rf_rate_var.set(field.current_label)
-            return
+                f"CH{armed[0]} is armed. Disarm before changing {what} - "
+                f"module settings can interrupt the RF link.")
+            return False
+        return bool(self.link and self.link.running)
 
+    def _write_field(self, index, value, description):
+        self.module_info_lbl.config(text=f"writing {description} ...")
+        self.log("info", f"Module: setting {description}")
+        self.link.submit("write", index=index, value=value,
+                         on_done=self._module_cb("written"))
+
+    def _after_write(self, field):
+        """ExpressLRS can change other fields in response, so reload them all."""
+        self._fields[field.index] = field
+        self.log("info", f"Module: {field.name} is now {field.display}")
+        if self._device:
+            self._request_field(1)
+
+    def _on_select_changed(self, index):
+        field = self._fields.get(index)
+        var = self._field_vars.get(index)
+        if field is None or var is None:
+            return
+        value = next((v for v, lab in field.choices() if lab == var.get()), None)
+        if value is None or value == field.value:
+            return
+        if not self._may_write(field.name):
+            var.set(field.current_label)
+            return
+        self._write_field(index, value, f"{field.name} = {var.get()}")
+
+    def _on_number_changed(self, index):
+        field = self._fields.get(index)
+        var = self._field_vars.get(index)
+        if field is None or var is None:
+            return
+        try:
+            value = int(float(var.get()))
+        except (TypeError, ValueError):
+            var.set(str(field.value))
+            return
+        if value == field.value:
+            return
+        if field.vmin is not None and not (field.vmin <= value <= field.vmax):
+            messagebox.showwarning(
+                "Out of range",
+                f"{field.name} accepts {field.vmin} to {field.vmax}.")
+            var.set(str(field.value))
+            return
+        if not self._may_write(field.name):
+            var.set(str(field.value))
+            return
+        self._write_field(index, value, f"{field.name} = {value}")
+
+    # ----------------------------------------------------------- commands
+    def run_command(self, index):
+        field = self._fields.get(index)
+        if field is None or not self._may_write(field.name):
+            return
+        lowered = field.name.lower()
+        warning = ""
+        if any(word in lowered for word in self.DISRUPTIVE):
+            warning = (" This takes the module off the air, so the CRSF link "
+                       "stops and you will have to start it again.")
         if not messagebox.askokcancel(
-                "Change packet rate",
-                f"Set the module to {label}?\n\nThe RF link drops and "
-                f"the receiver goes to failsafe for a moment while the module "
-                f"and receiver resync. Props off."):
-            self.rf_rate_var.set(field.current_label)
+                field.name, f"Run {field.name}?{warning} Props off."):
+            return
+        self._cmd_index = index
+        self.module_info_lbl.config(text=f"running {field.name} ...")
+        self.log("info", f"Module: running {field.name}")
+        self.link.submit("write", index=index, value=crsf.CMD_START,
+                         settle=0.1, on_done=self._module_cb("cmd"))
+
+    def _command_reply(self, field):
+        """Step through the state machine the module drives for commands."""
+        self._fields[field.index] = field
+
+        if field.status == crsf.CMD_PROGRESS:
+            self.module_info_lbl.config(
+                text=f"{field.name}: {field.info or 'working'}")
+            self.after(200, lambda i=field.index: self._poll_command(i))
             return
 
-        self._rate_pending = value
-        self.rf_rate_combo.config(state="disabled")
-        self.module_info_lbl.config(text=f"writing packet rate {label}...")
-        self.log("info", f"Setting module packet rate to {label}")
-        self.link.submit("write", index=field.index, value=value,
-                         on_done=self._module_cb("field"))
+        if field.status == crsf.CMD_CONFIRMATION_NEEDED:
+            ok = messagebox.askokcancel(
+                field.name, field.info or f"Confirm {field.name}?")
+            reply = crsf.CMD_CONFIRM if ok else crsf.CMD_CANCEL
+            self.link.submit("write", index=field.index, value=reply,
+                             settle=0.1, on_done=self._module_cb("cmd"))
+            return
+
+        self._cmd_index = None
+        outcome = field.info or "done"
+        self.module_info_lbl.config(text=f"{field.name}: {outcome}")
+        self.log("info", f"Module: {field.name} finished ({outcome})")
+
+    def _poll_command(self, index):
+        if self.link is None or not self.link.running or self._cmd_index != index:
+            return
+        self.link.submit("write", index=index, value=crsf.CMD_POLL,
+                         settle=0.1, on_done=self._module_cb("cmd"))
 
     def stop_link(self, reason=""):
         if self.link:
@@ -726,11 +847,10 @@ class App(tk.Tk):
             if reason:
                 self.log("info", f"Link stopped ({reason}). Receiver goes to failsafe.")
         self.start_btn.config(state="normal")
-        self._rate_field = None
         self._device = None
-        self.rf_rate_combo.config(state="disabled")
-        self.rf_rate_var.set("")
-        self.rf_rate_lbl.config(text="")
+        self._cmd_index = None
+        self._fields = {}
+        self._render_fields()
         self.module_btn.config(state="normal")
         self.module_info_lbl.config(
             text="Start the link, then read the settings from the module.")
