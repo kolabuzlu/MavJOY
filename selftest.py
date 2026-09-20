@@ -191,18 +191,17 @@ def _run(wire):
     print("telemetry decoded:", telem.get("link"))
     assert telem.get("link", {}).get("up_lq") == 100
 
-    # ---- failsafe: killing the input must END the link, not pause it.
-    # Resuming would hand control back at whatever the sticks and switches
-    # read, pulling a model out of the failsafe it had already entered.
+    # ---- failsafe: no pulses, then pulses again.
+    # A transmitter does not shut down because a stick stopped reporting.
+    # It stops putting frames out, the receiver falls into its own
+    # failsafe, and when the input returns it simply transmits again.
     print("\nstopping gamepad thread to test the stale-input failsafe...")
     before = lk.stats.frames_sent
     pad.stop()
-    lk.join(timeout=3.0)
-    after = lk.stats.frames_sent
-    print(f"link thread still alive: {lk.is_alive()}")
-    assert not lk.is_alive(), "link kept running with dead input!"
+    time.sleep(0.6)
+    assert lk.is_alive(), "the link shut itself down instead of going quiet"
+    assert lk.running, "the serial port was closed"
     assert not lk.transmitting
-    assert not lk.running, "the serial port was left open"
 
     # Count bytes, not frames_sent: a settings or status frame is invisible
     # to a frame counter while still being a frame ExpressLRS heard.
@@ -213,10 +212,27 @@ def _run(wire):
     while time.time() < t_end:
         leaked += wire.read()
         time.sleep(0.01)
-    print(f"frames sent after input died: {after - before}")
+    print(f"frames sent after input died: {lk.stats.frames_sent - before}")
     print(f"bytes written to the port over the next 2.0 s: {len(leaked)}")
     assert not leaked, (f"link wrote {len(leaked)} bytes during failsafe: "
                         f"{leaked[:32].hex(chr(32))} - must hear silence")
+
+    # ---- and now the input comes back, with nobody pressing anything
+    print("\nrestoring input; the link must resume on its own...")
+    pad2 = gp.SimGamepadThread()
+    pad2.start()
+    lk.gamepad = pad2
+    time.sleep(1.0)
+    resumed = b""
+    t_end = time.time() + 0.5
+    while time.time() < t_end:
+        resumed += wire.read()
+        time.sleep(0.005)
+    print(f"transmitting again: {lk.transmitting}, "
+          f"{len(resumed)} bytes in 0.5 s")
+    assert lk.transmitting, "the link did not resume when input returned"
+    assert len(resumed) > 1000, "frames are not flowing again"
+    pad2.stop()
 
     lk.stop()
     lk.join(timeout=2)

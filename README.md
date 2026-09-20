@@ -160,23 +160,22 @@ throttle and the throttle engine reads the pad. Matched on identity, a
 device returns to the slot it left, and a slot whose device is absent stays
 empty rather than grabbing whatever is nearest.
 
-**Losing a device ends the link; it does not pause it.** By the time you
-plug it back in the model is already in its own failsafe — RTL, on
-ArduPilot — and resuming would hand control straight back at whatever the
-sticks and switches happen to read, pulling it out of that. Clearing the
-latches is not enough to prevent it, because a `switch` source reads the
-lever's real position and the lever has not moved.
+**Losing a device stops the pulses; it does not shut the transmitter
+down.** This is the behaviour of any RC transmitter: frames stop going out,
+the receiver sees no pulses and falls into its own failsafe, and when the
+input comes back the frames simply resume. Nothing has to be pressed, and
+nothing is asked.
 
-So an unplug is treated exactly like any other link loss. The port is
-closed, which drops DTR/RTS and reboots the module's ESP, so RF goes away
-properly rather than pausing — the same thing that happens when you press
-Stop. The model holds failsafe until you press **Start** again, which
-re-runs every precondition: throttle at idle, latches cleared, every
-required device reporting.
+Nothing is reset on the way back either. A latched arm switch that was on
+is still on, and clearing it would put arm low in the first frame after
+recovery, which to a model still in the air is a disarm command. The
+controls are transmitted as they read, and it is the flight controller that
+decides whether to leave its failsafe — on ArduPilot, RTL is held until the
+mode channel changes. That decision belongs to the aircraft, not to this
+app.
 
-The device itself is still picked up automatically, so replugging fills the
-slot back in without touching the refresh button. It is only the
-transmitting that waits for you.
+The device itself is picked up automatically on plug-in, so the slot fills
+back in without touching refresh.
 
 ### Arming
 
@@ -392,8 +391,9 @@ Other safety behaviour:
 
 - The gamepad is polled on its own thread, so a frozen GUI cannot affect
   control, and input older than 150 ms counts as dead.
-- Losing an input device ends the link and closes the port, so the model
-  stays in failsafe until you deliberately press Start again.
+- Losing an input device stops the pulses and nothing more. The link stays
+  up, the receiver failsafes, and transmission resumes by itself when the
+  input returns — no prompt, no button.
 - While input is stale the link writes **nothing at all** — not telemetry
   requests, not settings traffic. Any well-formed frame is a frame the
   module heard, so anything on the wire undermines the watchdog that is
@@ -404,7 +404,10 @@ Other safety behaviour:
   and a write attempted while the link is live asks first. A command that
   pauses for confirmation re-checks on the way through, so it cannot
   complete against a model armed while the dialog was open.
-- **Starting a link never moves a control.** It reads the sticks and
+- **Starting a link never moves a control.** It is the only gate, and it
+  only happens when you press Start — the equivalent of EdgeTX's throttle
+  and switch warnings at power-on, which never fire again once you are
+  flying. It reads the sticks and
   switches as they stand and shows you what the first frame will carry if
   anything looks wrong — a throttle off idle, a channel already armed — for
   you to accept or cancel. It deliberately does not force them to a safe

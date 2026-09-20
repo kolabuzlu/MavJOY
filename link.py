@@ -363,28 +363,11 @@ class CrsfLink(threading.Thread):
         stale_slot, st = self._first_stale(states)
 
         if stale_slot is not None:
-            where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
-            reason = f"{where} disconnected" if not st.connected else \
-                     f"{where} data stale ({st.age() * 1000:.0f} ms)"
             if self.transmitting:
-                # Losing input in flight ends the link; it does not
-                # pause it. By the time the device comes back the model
-                # is in its own failsafe - RTL, on ArduPilot - and
-                # resuming would hand control straight back at whatever
-                # the sticks and switches happen to read, pulling it out
-                # of that. A switch source reads the lever's real
-                # position, so clearing the latches cannot prevent it.
-                #
-                # Closing the port is what makes this behave like any
-                # other link loss: it drops DTR/RTS, the module's ESP
-                # reboots, RF goes away properly, and the model holds
-                # failsafe until the pilot re-engages deliberately.
-                self.transmitting = False
-                self.on_event("error",
-                              f"{reason}. Link closed - the model stays "
-                              f"in failsafe until you press Start again.")
-                self._stop_event.set()
-                return
+                where = "gamepad" if stale_slot == 0 else f"device {stale_slot}"
+                reason = f"{where} disconnected" if not st.connected else                          f"{where} data stale ({st.age() * 1000:.0f} ms)"
+                self.on_event("warn", f"Stopped transmitting: {reason}. "
+                                      f"Receiver will go to failsafe.")
             self.transmitting = False
             with self._lock:
                 self.stats.frames_skipped += 1
@@ -393,6 +376,15 @@ class CrsfLink(threading.Thread):
             # watchdog on its handset UART, and any well-formed frame - a
             # settings request included - is a frame it heard. Telemetry is
             # read-only, so it stays.
+            #
+            # The link itself stays up, the way a transmitter does. A handset
+            # does not shut down because a stick stopped reporting, and it
+            # does not ask permission before working again: when the input
+            # comes back it simply transmits what the controls now read, and
+            # it is the flight controller that decides whether to leave its
+            # failsafe. Nothing here is reset on the way back, because a
+            # latched arm switch that was on is still on, and clearing it
+            # would command a disarm.
             self._read_telemetry()
             return
 
