@@ -242,6 +242,8 @@ class CrsfLink(threading.Thread):
         self._rf_since = 0.0     # when the current reading started
         self._rf_lost = False    # a confirmed dropout we have not held for
         self._rf_hold = None     # values from the last confirmed-good tick
+        self._rf_silent_since = 0.0   # when the module last told us nothing
+        self._rf_said_silent = False  # warned that it cannot be watched
         self._status_next = 0.0
         self._clear_warning = threading.Event()
 
@@ -399,6 +401,32 @@ class CrsfLink(threading.Thread):
             return bool(status.get("connected"))
         return None
 
+    # How long the module has to say nothing at all before we admit we
+    # cannot see the RF link from here.
+    RF_SILENCE_WARN = 5.0
+
+    def _warn_rf_unwatchable(self, now):
+        """Say once that an RF dropout cannot be detected at all.
+
+        Some setups give us no telemetry: a one-way wire, a module that
+        stays quiet, telemetry switched off at the receiver. The hold then
+        cannot work, and a safety feature that quietly does nothing is worse
+        than one that is honestly absent - so it says so rather than leaving
+        a promise it cannot keep.
+        """
+        if self._rf_said_silent:
+            return
+        if not self._rf_silent_since:
+            self._rf_silent_since = now
+            return
+        if now - self._rf_silent_since < self.RF_SILENCE_WARN:
+            return
+        self._rf_said_silent = True
+        self.on_event("warn", "No telemetry from the module, so an RF dropout "
+                              "cannot be seen from here: the channels will "
+                              "NOT be held if the model comes back. Losing "
+                              "the input is still covered.")
+
     def _track_rf(self, values):
         """Follow the RF link, and say when it has just come back.
 
@@ -413,7 +441,18 @@ class CrsfLink(threading.Thread):
         now = time.monotonic()
         up = self._rf_report()
         if up is None:
+            self._warn_rf_unwatchable(now)
             return False
+
+        self._rf_silent_since = 0.0   # the module is talking to us again
+
+        if self._rf_up is None:
+            # Say so once, so the feature is not silently inert. Without
+            # this there is no way to tell a link being watched from one
+            # that never could be.
+            self.on_event("info", "Module is reporting the RF link"
+                          + (": model connected." if up
+                             else ": no model connected yet."))
 
         if up != self._rf_up:
             self._rf_up = up
