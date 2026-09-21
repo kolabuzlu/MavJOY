@@ -35,6 +35,28 @@ WHEN THE LINK COMES BACK
   the instant the link is back.
 
 
+THROTTLE
+
+  Three modes, and one of them has a trap.
+
+  trigger   An analog trigger. Released means idle. You hold it for the
+            whole flight, but letting go always means idle.
+
+  ramp      Ratcheting. Hold the up control to increase, the down control
+            to decrease. It stays where you left it, like a real throttle
+            stick.
+
+  axis      A raw stick axis, and the one to be careful with. Most gamepad
+            sticks are sprung and spring back to the middle of their
+            travel - and the middle of the range is HALF THROTTLE. Let go
+            and the throttle does not fall to idle, it jumps to 50%. Use
+            this mode only with a control that stays where you put it, such
+            as a proper throttle lever.
+
+  Whichever mode you use, a link will not start unless the throttle reads
+  0%, and the Cut button drops it to idle instantly.
+
+
 ARMING
 
   CH5 is the arm channel. Always, and nothing else is. While it reads high
