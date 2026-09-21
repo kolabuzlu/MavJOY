@@ -38,38 +38,16 @@ DARK = {
     "bar_trough": "#2b3242",
 }
 
-LIGHT = {
-    "name": "light",
-    "bg": "#f0f0f0",
-    "panel": "#f0f0f0",
-    "field": "#ffffff",
-    "text": "#1a1a1a",
-    "muted": "#777777",
-    "faint": "#555555",
-    "border": "#bfbfbf",
-    "accent": "#0a5cd6",
-    "on_accent": "#ffffff",
-    "ok": "#2e7d32",
-    "warn": "#b36b00",
-    "danger": "#cc0000",
-    "idle": "#555555",
-    "off": "#dddddd",
-    "select_bg": "#cce4ff",
-    "bar": "#0a5cd6",
-    "bar_trough": "#dddddd",
-}
+def apply(root: tk.Misc) -> dict:
+    """Paint the whole widget tree and return the palette used.
 
-PALETTES = {"dark": DARK, "light": LIGHT}
-DEFAULT = "dark"
-
-
-def palette(name: str) -> dict:
-    return PALETTES.get(name, PALETTES[DEFAULT])
-
-
-def apply(root: tk.Misc, name: str = DEFAULT) -> dict:
-    """Paint the whole widget tree in `name` and return its palette."""
-    pal = palette(name)
+    One theme. There was a light one and a View menu to pick it, but Tk
+    cannot repaint widgets that already exist from a style change, so
+    choosing it only took effect on the next start - and nobody wanted it.
+    The palette is still returned rather than read as a global, because
+    every widget that needs a colour takes it from here.
+    """
+    pal = DARK
     style = ttk.Style(root)
     try:
         style.theme_use("clam")

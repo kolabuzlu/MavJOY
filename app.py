@@ -19,7 +19,7 @@ import queue
 import sys
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import config as configmod
 import crsf
@@ -69,7 +69,7 @@ class App(tk.Tk):
         self.minsize(900, 700)
 
         self.cfg, warning = configmod.load()
-        self.pal = theme.apply(self, self.cfg.get("theme", theme.DEFAULT))
+        self.pal = theme.apply(self)
         self.simulate = simulate
         self.link = None
         self._events = queue.Queue(maxsize=500)
@@ -146,19 +146,16 @@ class App(tk.Tk):
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Save configuration", command=self.save_config)
         filemenu.add_command(label="Reload configuration", command=self.reload_config)
+        filemenu.add_separator()
+        filemenu.add_command(label="Export configuration to file…",
+                             command=self.export_config_file)
+        filemenu.add_command(label="Import configuration from file…",
+                             command=self.import_config_file)
+        filemenu.add_separator()
         filemenu.add_command(label="Reset to defaults", command=self.reset_config)
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.on_close)
         menubar.add_cascade(label="File", menu=filemenu)
-
-        viewmenu = tk.Menu(menubar, tearoff=0)
-        self.theme_var = tk.StringVar(
-            value=self.cfg.get("theme", theme.DEFAULT))
-        for name in ("dark", "light"):
-            viewmenu.add_radiobutton(label=name.capitalize(), value=name,
-                                     variable=self.theme_var,
-                                     command=self.on_theme_changed)
-        menubar.add_cascade(label="View", menu=viewmenu)
 
         helpmenu = tk.Menu(menubar, tearoff=0)
         helpmenu.add_command(label="About", command=self.show_about)
@@ -1245,19 +1242,6 @@ class App(tk.Tk):
         self.stop_btn.config(state="normal")
         self.after(1500, self.read_module_settings)
 
-    def on_theme_changed(self):
-        """Tk cannot repaint existing widgets from a style change alone, so
-        the new theme is saved and applied on the next start."""
-        name = self.theme_var.get()
-        if name == self.cfg.get("theme"):
-            return
-        self.cfg["theme"] = name
-        configmod.save(self.cfg)
-        self.log("info", f"Theme set to {name}; it applies next time MavJOY starts.")
-        messagebox.showinfo(
-            "Theme",
-            f"Saved the {name} theme. Restart MavJOY to see it.")
-
     def _on_rate_auto(self):
         """Auto mode drives the spinbox, so stop it being edited by hand."""
         self.rate_spin.config(state="disabled" if self.rate_auto.get() else "normal")
@@ -2054,15 +2038,82 @@ class App(tk.Tk):
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def save_config(self):
+    CONFIG_FILETYPES = [("MavJOY configuration", "*.mavjoy.json"),
+                        ("JSON files", "*.json"),
+                        ("All files", "*.*")]
+
+    def _collect_widgets(self):
+        """Read every tab back into cfg, so it describes what is on screen."""
         for i in range(crsf.NUM_CHANNELS):
             self.on_channel_changed(i)
         self.on_throttle_changed()
+        self.cfg["port"] = self.selected_port() or self.cfg.get("port", "")
+        self.cfg["baud"] = int(self.baud_var.get())
+        self.cfg["rate_hz"] = int(self.rate_var.get())
+        self.cfg["rate_auto"] = bool(self.rate_auto.get())
+
+    def export_config_file(self):
+        """Write the whole setup somewhere another copy of MavJOY can read it."""
         try:
-            self.cfg["port"] = self.selected_port() or self.cfg.get("port", "")
-            self.cfg["baud"] = int(self.baud_var.get())
-            self.cfg["rate_hz"] = int(self.rate_var.get())
-            self.cfg["rate_auto"] = bool(self.rate_auto.get())
+            self._collect_widgets()
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Export configuration",
+            defaultextension=".mavjoy.json",
+            initialfile="mavjoy-setup.mavjoy.json",
+            filetypes=self.CONFIG_FILETYPES)
+        if not path:
+            return
+        try:
+            configmod.export(self.cfg, path)
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+        self.log("info", f"Configuration exported to {path}")
+
+    def import_config_file(self):
+        """Replace the whole setup with one read from a file."""
+        if self.link and self.link.running:
+            messagebox.showwarning(
+                "Link running",
+                "Stop the link first. Importing replaces the mapping, the "
+                "throttle and every endpoint at once, which is not something "
+                "to do to a model that is flying.")
+            return
+        path = filedialog.askopenfilename(
+            parent=self, title="Import configuration",
+            filetypes=self.CONFIG_FILETYPES)
+        if not path:
+            return
+        try:
+            cfg = configmod.read_file(path)
+        except ValueError as exc:
+            messagebox.showerror(
+                "Import failed", f"{os.path.basename(path)} {exc}.")
+            return
+        if not messagebox.askokcancel(
+                "Import configuration",
+                f"Replace the mapping, throttle, endpoints and link settings "
+                f"with {os.path.basename(path)}?\n\n"
+                f"This is saved straight away, so whatever is set up now is "
+                f"gone unless you have exported it. Latch positions are not "
+                f"imported - every latch starts low."):
+            return
+        self.cfg = cfg
+        self._apply_config_to_widgets()
+        self.refresh_gamepads()
+        try:
+            configmod.save(self.cfg)
+        except Exception as exc:
+            messagebox.showerror("Saving the imported configuration failed",
+                                 str(exc))
+        self.log("info", f"Configuration imported from {path}")
+
+    def save_config(self):
+        try:
+            self._collect_widgets()
             configmod.save(self.cfg)
             self.log("info", f"Configuration saved to {configmod.CONFIG_PATH}")
         except Exception as exc:

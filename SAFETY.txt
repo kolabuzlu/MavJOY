@@ -52,6 +52,11 @@ FILES
   file holds your port, mapping, output endpoints and the latch positions
   carried over from the last run.
 
+  File > Export configuration writes the whole setup to a file you can
+  copy to another machine and read back with File > Import. Latch
+  positions are deliberately left out, so nothing comes up armed on the
+  other machine because it was armed on this one.
+
 
 Source, issues and full documentation:
   https://github.com/kolabuzlu/MavJOY

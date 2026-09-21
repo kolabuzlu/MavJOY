@@ -7,6 +7,7 @@ the link talks to a loopback TCP socket through pyserial's ``socket://``
 URL handler, which exercises the same pyserial read/write paths."""
 
 import os
+import json
 import socket
 import tempfile
 import sys
@@ -435,6 +436,63 @@ def _check_endpoints():
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
 
 
+def _check_config_file():
+    """A configuration survives a trip through a file, minus the latches.
+
+    The point of exporting is that another machine ends up set up the same
+    way, so the test is a round trip rather than a look at what was
+    written. Latches are the exception and are checked for by name: they
+    say where the controls were left, and carrying an armed channel to
+    another machine because it was armed here is the one thing this must
+    not do.
+    """
+    print("")
+    print("-- configuration files --")
+    cfg = configmod.default_config()
+    cfg["baud"] = 921600
+    cfg["rate_hz"] = 333
+    cfg["channels"][4] = {"src": "toggle", "idx": 7, "inv": False}
+    cfg["channels"][5] = {"src": "oneway", "idx": 3, "out_max": 1900,
+                          "reset_ch": 1, "reset_move": 120}
+    cfg["throttle"]["mode"] = "ramp"
+    cfg["latches"] = {"5": {"src": "toggle", "state": True}}
+
+    path = os.path.join(tempfile.gettempdir(), "mavjoy_export_test.mavjoy.json")
+    configmod.export(cfg, path)
+    raw = json.load(open(path, encoding="utf-8"))
+    print(f"   exported {len(raw)} keys, marker {raw.get('mavjoy_config')}")
+    assert "latches" not in raw, "latch positions must not be exported"
+
+    back = configmod.read_file(path)
+    os.unlink(path)
+    print(f"   baud {back['baud']}   rate {back['rate_hz']}   "
+          f"throttle {back['throttle']['mode']}")
+    print(f"   CH6 {back['channels'][5]}")
+    assert back["baud"] == 921600
+    assert back["rate_hz"] == 333
+    assert back["throttle"]["mode"] == "ramp"
+    assert back["latches"] == {}, "latches must not come back either"
+
+    # The mixer built from the imported file must behave like the original.
+    a, b = gp.Mixer(cfg), gp.Mixer(back)
+    for i in range(crsf.NUM_CHANNELS):
+        assert a.channels[i].to_dict() == b.channels[i].to_dict(), (
+            f"CH{i + 1} differs after the round trip")
+    print(f"   all {crsf.NUM_CHANNELS} channels identical after the round trip")
+
+    for body, why in ((b"not json at all", "garbage"),
+                      (b'{"baud": 921600}', "no channel mapping"),
+                      (b"[1, 2, 3]", "not an object")):
+        with open(path, "wb") as fh:
+            fh.write(body)
+        try:
+            configmod.read_file(path)
+            raise AssertionError(f"{why} should have been refused")
+        except ValueError as exc:
+            print(f"   refused {why}: {str(exc)[:44]}...")
+    os.unlink(path)
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -604,6 +662,7 @@ def _run(wire):
     _check_arm_from_model()
     _check_latch_memory()
     _check_endpoints()
+    _check_config_file()
 
     lk.stop()
     lk.join(timeout=2)

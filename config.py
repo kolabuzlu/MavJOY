@@ -65,7 +65,6 @@ DEFAULT_CONFIG = {
     "port": "",
     "baud": 921600,
     "rate_hz": 250,
-    "theme": "dark",
     "rate_auto": True,    # follow the rate the module asks for in its sync frames
     "sync_byte": 0xC8,
     # One entry per device slot: slot 0 is the sticks, slot 1 can be a
@@ -133,15 +132,18 @@ def _merge(base, override):
     return out
 
 
-def load(path: str = CONFIG_PATH):
-    if not os.path.exists(path):
-        return default_config(), None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except Exception as exc:
-        return default_config(), f"config.json could not be read ({exc}); using defaults"
+# Bumped only if the file's shape changes in a way an older MavJOY would
+# read wrongly. Missing keys are filled from the defaults, so simply adding
+# a setting is not such a change.
+CONFIG_FORMAT = 1
 
+# Keys that record what this machine was doing rather than how the model is
+# set up, so they do not travel with an exported configuration.
+NOT_PORTABLE = ("latches",)
+
+
+def _normalise(data):
+    """Fill a configuration out from the defaults and tidy its shape."""
     cfg = _merge(DEFAULT_CONFIG, data)
     # Configs written before multi-device support named a single pad.
     if "gamepads" not in data and "gamepad_index" in data:
@@ -154,7 +156,57 @@ def load(path: str = CONFIG_PATH):
         cfg["channels"] = [dict(DEFAULT_CONFIG["channels"][i] if i < 16 else {},
                                 **(channels[i] if i < len(channels) else {}))
                            for i in range(crsf.NUM_CHANNELS)]
-    return cfg, None
+    return cfg
+
+
+def export(cfg, path):
+    """Write the setup out as a file another copy of MavJOY can read.
+
+    Latch positions stay behind. They record where the controls happened to
+    be left, not how the model is set up, and carrying them across would
+    put a channel high on the other machine because it was high on this
+    one - including an arm channel.
+    """
+    out = {k: v for k, v in copy.deepcopy(cfg).items() if k not in NOT_PORTABLE}
+    out["mavjoy_config"] = CONFIG_FORMAT
+    save(out, path)
+
+
+def read_file(path):
+    """Read an exported configuration, or raise ValueError saying why not.
+
+    Merged over the defaults, so a file from an older MavJOY is filled in
+    rather than refused. Latches are dropped coming in as well as going
+    out, since the file may be a copied config.json rather than an export.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise ValueError(f"could not be opened ({exc})") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"is not valid JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise ValueError("does not hold a configuration")
+    if not isinstance(data.get("channels"), list):
+        raise ValueError("has no channel mapping, so it is not a MavJOY "
+                         "configuration")
+    cfg = _normalise(data)
+    for key in NOT_PORTABLE:
+        cfg[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+    return cfg
+
+
+def load(path: str = CONFIG_PATH):
+    if not os.path.exists(path):
+        return default_config(), None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        return default_config(), f"config.json could not be read ({exc}); using defaults"
+
+    return _normalise(data), None
 
 
 def save(cfg, path: str = CONFIG_PATH):
