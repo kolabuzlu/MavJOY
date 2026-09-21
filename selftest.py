@@ -493,6 +493,41 @@ def _check_config_file():
     os.unlink(path)
 
 
+def _check_fixed_value():
+    """A "fixed" channel sends the constant it was given; "none" sends centre.
+
+    "fixed" could always do this, but had no box to type a value into, so
+    the feature existed and could not be reached. The other half of the
+    test is that "none" is untouched: it sends centre and has nothing to
+    set, which is the whole difference between the two.
+    """
+    print("")
+    print("-- fixed channel values --")
+    cfg = configmod.default_config()
+    cfg["channels"][7] = {"src": "none"}
+    # A value on a "none" channel is ignored: none means centre, full stop.
+    cfg["channels"][8] = {"src": "none", "value": crsf.us_to_crsf(1750)}
+    cfg["channels"][9] = {"src": "fixed", "value": crsf.us_to_crsf(1200)}
+    m = gp.Mixer(cfg)
+    m.reset()
+
+    st = gp.InputState(axes=(0.0,) * 4, buttons=(False,) * 8, hats=((0, 0),),
+                       timestamp=time.monotonic(), connected=True)
+    v = m.compute({0: st})
+    for n, want in ((8, 1500), (9, 1500), (10, 1200)):
+        got = crsf.crsf_to_us(v[n - 1])
+        print(f"   CH{n:<2} {got} us")
+        assert got == want, f"CH{n} should send {want} us, got {got}"
+
+    # Failsafe values are what the mixer reports before anything is
+    # computed; a channel parked at a value should read as that value there
+    # too, not as centre.
+    fs = m.failsafe_values()
+    assert crsf.crsf_to_us(fs[9]) == 1200, "a fixed channel must hold at rest"
+    assert crsf.crsf_to_us(fs[8]) == 1500, "none is centre, value or no value"
+    print("   and they hold in the failsafe values too")
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -681,6 +716,7 @@ def _run(wire):
     _check_latch_memory()
     _check_endpoints()
     _check_config_file()
+    _check_fixed_value()
 
     lk.stop()
     lk.join(timeout=2)

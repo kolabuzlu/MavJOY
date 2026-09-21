@@ -485,7 +485,7 @@ INDEXED_SOURCES = ("axis", "button", "toggle", "oneway", "cycle", "switch",
                    "hat_x", "hat_y")
 
 SOURCE_HELP = {
-    "none": "sends centre (992)",
+    "none": "unused: sends centre (1500 µs)",
     "axis": "analog axis, -1..+1 -> 172..1811",
     "throttle": "the throttle engine configured above",
     "button": "momentary: low when released, high while held",
@@ -497,7 +497,7 @@ SOURCE_HELP = {
               "is the first button, steps is how many",
     "hat_x": "d-pad left/right",
     "hat_y": "d-pad up/down",
-    "fixed": "constant value",
+    "fixed": "a constant you type, in microseconds",
 }
 
 THROTTLE_MODES = ("trigger", "ramp", "axis")

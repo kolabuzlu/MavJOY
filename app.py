@@ -368,6 +368,24 @@ class App(tk.Tk):
         self.rf_lbl = ttk.Label(info, text="no telemetry", width=44, anchor="e")
         self.rf_lbl.pack(anchor="e")
 
+    @staticmethod
+    def _commit_on(widget, handler):
+        """Apply a typed box when it is committed, not while it is typed.
+
+        Per keystroke, a half-typed number is a different number: the "1"
+        on the way to "1750" is one microsecond. It gets clamped into range,
+        written back into the box - so it fights whatever is being typed and
+        never gets past the first digit - and applied live, which on a
+        channel that is driving something means the output moves while
+        someone types.
+
+        Return and leaving the box are the two ways of saying it is
+        finished. The spinner arrows still apply at once, because a click
+        on those is already a whole value.
+        """
+        for event in ("<Return>", "<FocusOut>"):
+            widget.bind(event, handler)
+
     def _build_notebook(self):
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=8, pady=4)
@@ -432,16 +450,14 @@ class App(tk.Tk):
                                   increment=10, width=6, textvariable=lo,
                                   command=lambda n=i: self.on_output_changed(n))
             lo_spin.grid(row=row, column=2, sticky="w", padx=(0, 10))
-            lo_spin.bind("<KeyRelease>",
-                         lambda _e, n=i: self.on_output_changed(n))
+            self._commit_on(lo_spin, lambda _e, n=i: self.on_output_changed(n))
 
             hi = tk.StringVar(value=str(ch.out_max))
             hi_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
                                   increment=10, width=6, textvariable=hi,
                                   command=lambda n=i: self.on_output_changed(n))
             hi_spin.grid(row=row, column=3, sticky="w", padx=(0, 10))
-            hi_spin.bind("<KeyRelease>",
-                         lambda _e, n=i: self.on_output_changed(n))
+            self._commit_on(hi_spin, lambda _e, n=i: self.on_output_changed(n))
 
             sent = ttk.Label(grid, text="—", width=12, anchor="e")
             sent.grid(row=row, column=4, sticky="e", padx=(0, 10))
@@ -450,7 +466,8 @@ class App(tk.Tk):
             bar.grid(row=row, column=5, sticky="ew", pady=2)
 
             self.out_widgets.append({"lo": lo, "hi": hi, "sent": sent,
-                                     "bar": bar})
+                                     "bar": bar, "lo_spin": lo_spin,
+                                     "hi_spin": hi_spin})
 
         foot = ttk.Frame(tab)
         foot.pack(fill="x", padx=10, pady=8)
@@ -542,11 +559,12 @@ class App(tk.Tk):
         ("index",    "w",       0,  6, 0),   # 3 index
         ("inv",      "center",  0,  6, 0),   # 4 invert
         ("steps",    "w",       0, 14, 0),   # 5 steps
-        ("reset by",  "w",      0,  6, 0),   # 6 latch reset: watched channel
-        ("moves",    "w",       0, 14, 0),   # 7 latch reset: how far, in us
-        ("value",    "w",       0,  8, 1),   # 8 bar
-        ("",         "e",       0, 10, 0),   # 9 numeric value
-        ("",         "w",       0,  0, 0),   # 10 hint
+        ("fixed µs", "w",   0, 10, 0),   # 6 constant, for none and fixed
+        ("reset by",  "w",      0,  6, 0),   # 7 latch reset: watched channel
+        ("moves",    "w",       0, 14, 0),   # 8 latch reset: how far, in us
+        ("value",    "w",       0,  8, 1),   # 9 bar
+        ("",         "e",       0, 10, 0),   # 10 numeric value
+        ("",         "w",       0,  0, 0),   # 11 hint
     )
 
     def _build_channels_tab(self, nb):
@@ -598,7 +616,7 @@ class App(tk.Tk):
             spin = ttk.Spinbox(grid, from_=0, to=31, width=5, textvariable=idx,
                                command=lambda n=i: self.on_channel_changed(n))
             place(spin, 3)
-            spin.bind("<KeyRelease>", lambda _e, n=i: self.on_channel_changed(n))
+            self._commit_on(spin, lambda _e, n=i: self.on_channel_changed(n))
 
             inv = tk.BooleanVar(value=chcfg.inv)
             place(ttk.Checkbutton(grid, variable=inv,
@@ -611,12 +629,22 @@ class App(tk.Tk):
                                      command=lambda n=i: self.on_channel_changed(n))
             place(steps_spin, 5)
 
+            fixed_us = tk.StringVar(value=str(int(round(
+                crsf.crsf_to_us(chcfg.value)))))
+            fixed_spin = ttk.Spinbox(grid, from_=crsf.US_MIN, to=crsf.US_MAX,
+                                     increment=10, width=6,
+                                     textvariable=fixed_us,
+                                     command=lambda n=i: self.on_channel_changed(n))
+            place(fixed_spin, 6)
+            self._commit_on(fixed_spin,
+                            lambda _e, n=i: self.on_channel_changed(n))
+
             reset_ch = tk.StringVar(value=self._reset_label(chcfg.reset_ch))
             reset_combo = ttk.Combobox(
                 grid, textvariable=reset_ch, width=6, state="readonly",
                 values=[self.NO_INDEX] + [f"CH{n}" for n in
                                           range(1, crsf.NUM_CHANNELS + 1)])
-            place(reset_combo, 6)
+            place(reset_combo, 7)
             reset_combo.bind("<<ComboboxSelected>>",
                              lambda _e, n=i: self.on_channel_changed(n))
 
@@ -624,23 +652,24 @@ class App(tk.Tk):
             reset_spin = ttk.Spinbox(grid, from_=10, to=500, increment=10,
                                      width=5, textvariable=reset_move,
                                      command=lambda n=i: self.on_channel_changed(n))
-            place(reset_spin, 7)
-            reset_spin.bind("<KeyRelease>",
+            place(reset_spin, 8)
+            self._commit_on(reset_spin,
                             lambda _e, n=i: self.on_channel_changed(n))
 
             bar = ttk.Progressbar(grid, maximum=1000)
-            place(bar, 8, sticky="ew")
+            place(bar, 9, sticky="ew")
 
             val = ttk.Label(grid, text="—", anchor="e", width=14)
-            place(val, 9, sticky="e")
+            place(val, 10, sticky="e")
 
             place(ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
-                            foreground=self.pal["muted"]), 10)
+                            foreground=self.pal["muted"]), 11)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
                                     "spin": spin, "steps_spin": steps_spin,
-                                    "dev": dev,
+                                    "dev": dev, "fixed_us": fixed_us,
+                                    "fixed_spin": fixed_spin,
                                     "reset_ch": reset_ch, "reset_move": reset_move,
                                     "reset_combo": reset_combo,
                                     "reset_spin": reset_spin})
@@ -683,7 +712,7 @@ class App(tk.Tk):
             sp = ttk.Spinbox(frm, from_=lo, to=hi, width=5, textvariable=var,
                              command=self.on_throttle_changed)
             sp.grid(row=row, column=1, sticky="w")
-            sp.bind("<KeyRelease>", lambda _e: self.on_throttle_changed())
+            self._commit_on(sp, lambda _e: self.on_throttle_changed())
             ttk.Label(frm, text=hint, foreground=self.pal["muted"]).grid(row=row, column=2,
                                                                  sticky="w", padx=8)
             return var
@@ -1084,6 +1113,16 @@ class App(tk.Tk):
             w["steps"].set(self.NO_INDEX)
             w["steps_spin"].config(state="disabled")
 
+        # Only "fixed" carries a constant. Every other source takes its
+        # value from an input, so the box would be a lie - "none" included,
+        # which is simply centre and has nothing to set.
+        if ch.src == "fixed":
+            w["fixed_spin"].config(state="normal")
+            w["fixed_us"].set(str(int(round(crsf.crsf_to_us(ch.value)))))
+        else:
+            w["fixed_us"].set(self.NO_INDEX)
+            w["fixed_spin"].config(state="disabled")
+
         # Only a latch has anything to reset. A switch reads its lever every
         # frame, so there is no stored state to clear.
         if ch.src in ("toggle", "oneway", "cycle"):
@@ -1115,6 +1154,7 @@ class App(tk.Tk):
             raw_idx = str(w["idx"].get()).strip().lower()
             raw_steps = str(w["steps"].get()).strip().lower()
             raw_move = str(w["reset_move"].get()).strip().lower()
+            raw_fixed = str(w["fixed_us"].get()).strip().lower()
             # The boxes read "none" for whatever the source does not use;
             # that is the widget being blanked, not a request for zero.
             new = gp.ChannelMap(
@@ -1123,7 +1163,13 @@ class App(tk.Tk):
                     else max(0, int(raw_idx)),
                 inv=bool(w["inv"].get()),
                 dev=int(w["dev"].get()),
-                value=old.value,
+                # Typed in microseconds, stored in channel units - the
+                # same numbers the flight controller reports, so what is
+                # typed here is what it shows.
+                value=old.value if raw_fixed in ("", self.NO_INDEX)
+                      else crsf.clamp_channel(crsf.us_to_crsf(
+                          max(crsf.US_MIN,
+                              min(crsf.US_MAX, int(float(raw_fixed)))))),
                 steps=old.steps if raw_steps in ("", self.NO_INDEX)
                       else max(2, min(6, int(raw_steps))),
                 # Owned by the Outputs tab; this one must not reset them.
