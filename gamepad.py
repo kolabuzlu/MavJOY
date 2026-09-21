@@ -484,6 +484,12 @@ SOURCES = ("none", "axis", "throttle", "button", "toggle", "oneway",
 INDEXED_SOURCES = ("axis", "button", "toggle", "oneway", "cycle", "switch",
                    "hat_x", "hat_y")
 
+# Sources a guard button can hold shut. All of them are driven by buttons,
+# which is what makes a guard meaningful: there is a discrete moment the
+# channel would otherwise change, and the guard decides whether it counts.
+# An axis has no such moment, so a guard on one would be a mute, not a guard.
+GUARDED_SOURCES = ("button", "toggle", "oneway", "cycle", "switch")
+
 SOURCE_HELP = {
     "none": "unused: sends centre (1500 µs)",
     "axis": "analog axis, -1..+1 -> 172..1811",
@@ -603,6 +609,7 @@ class ChannelMap:
     reset_move: int = 100          # how far it must move to count, in us
     value: int = crsf.CHANNEL_MID  # for src == "fixed"
     steps: int = 3                 # positions, for "cycle" and "switch"
+    guard: int = -1                # button that must be held to change it
     out_min: int = crsf.US_MIN     # endpoint, in microseconds
     out_max: int = crsf.US_MAX     # endpoint, in microseconds
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
@@ -642,6 +649,7 @@ class ChannelMap:
                    reset_move=int(d.get("reset_move", 100)),
                    value=int(d.get("value", crsf.CHANNEL_MID)),
                    steps=int(d.get("steps", 3)),
+                   guard=int(d.get("guard", -1)),
                    out_min=_endpoint(d.get("out_min"), crsf.US_MIN),
                    out_max=_endpoint(d.get("out_max"), crsf.US_MAX),
                    buttons=tuple(d.get("buttons") or ()))
@@ -650,7 +658,7 @@ class ChannelMap:
         out = {"src": self.src, "idx": self.idx, "inv": self.inv,
                "dev": self.dev,
                "reset_ch": self.reset_ch, "reset_move": self.reset_move,
-               "value": self.value, "steps": self.steps,
+               "value": self.value, "steps": self.steps, "guard": self.guard,
                "out_min": self.out_min, "out_max": self.out_max}
         if self.buttons:
             out["buttons"] = list(self.buttons)
@@ -1088,6 +1096,23 @@ class Mixer:
 
     def _channel_value(self, ch: ChannelMap, st: InputState, thr: float, pressed):
         src = ch.src
+
+        # A guard button, for a control that must not move by being brushed
+        # against - an arm switch above all. While the guard is not held the
+        # channel is evaluated as though nothing were pressed at all, which
+        # does the right thing for every source it applies to: a press
+        # raises no edge, so a toggle does not flip, a one-way does not
+        # latch and a cycle does not step; a momentary button reads low; and
+        # a switch, seeing no position lit, holds the one it already had.
+        #
+        # It guards BOTH ways. Being unable to disarm by accident is the
+        # point of it in the air, and on the ground stopping the link is
+        # always there if the guard itself fails.
+        if ch.guard >= 0 and src in GUARDED_SOURCES:
+            held = (ch.guard < len(st.buttons)) and st.buttons[ch.guard]
+            if not held:
+                st = _BLANK_STATE
+                pressed = _NO_EDGES
 
         if src == "none":
             return crsf.CHANNEL_MID

@@ -559,12 +559,13 @@ class App(tk.Tk):
         ("index",    "w",       0,  6, 0),   # 3 index
         ("inv",      "center",  0,  6, 0),   # 4 invert
         ("steps",    "w",       0, 14, 0),   # 5 steps
-        ("fixed µs", "w",   0, 10, 0),   # 6 constant, for none and fixed
-        ("reset by",  "w",      0,  6, 0),   # 7 latch reset: watched channel
-        ("moves",    "w",       0, 14, 0),   # 8 latch reset: how far, in us
-        ("value",    "w",       0,  8, 1),   # 9 bar
-        ("",         "e",       0, 10, 0),   # 10 numeric value
-        ("",         "w",       0,  0, 0),   # 11 hint
+        ("guard",    "w",       0, 10, 0),   # 6 button that must be held
+        ("fixed µs", "w",   0, 10, 0),   # 7 constant, for none and fixed
+        ("reset by",  "w",      0,  6, 0),   # 8 latch reset: watched channel
+        ("moves",    "w",       0, 14, 0),   # 9 latch reset: how far, in us
+        ("value",    "w",       0,  8, 1),   # 10 bar
+        ("",         "e",       0, 10, 0),   # 11 numeric value
+        ("",         "w",       0,  0, 0),   # 12 hint
     )
 
     def _build_channels_tab(self, nb):
@@ -629,13 +630,21 @@ class App(tk.Tk):
                                      command=lambda n=i: self.on_channel_changed(n))
             place(steps_spin, 5)
 
+            guard = tk.StringVar(value=str(chcfg.guard))
+            guard_spin = ttk.Spinbox(grid, from_=-1, to=31, width=5,
+                                     textvariable=guard,
+                                     command=lambda n=i: self.on_channel_changed(n))
+            place(guard_spin, 6)
+            self._commit_on(guard_spin,
+                            lambda _e, n=i: self.on_channel_changed(n))
+
             fixed_us = tk.StringVar(value=str(int(round(
                 crsf.crsf_to_us(chcfg.value)))))
             fixed_spin = ttk.Spinbox(grid, from_=crsf.US_MIN, to=crsf.US_MAX,
                                      increment=10, width=6,
                                      textvariable=fixed_us,
                                      command=lambda n=i: self.on_channel_changed(n))
-            place(fixed_spin, 6)
+            place(fixed_spin, 7)
             self._commit_on(fixed_spin,
                             lambda _e, n=i: self.on_channel_changed(n))
 
@@ -644,7 +653,7 @@ class App(tk.Tk):
                 grid, textvariable=reset_ch, width=6, state="readonly",
                 values=[self.NO_INDEX] + [f"CH{n}" for n in
                                           range(1, crsf.NUM_CHANNELS + 1)])
-            place(reset_combo, 7)
+            place(reset_combo, 8)
             reset_combo.bind("<<ComboboxSelected>>",
                              lambda _e, n=i: self.on_channel_changed(n))
 
@@ -652,24 +661,25 @@ class App(tk.Tk):
             reset_spin = ttk.Spinbox(grid, from_=10, to=500, increment=10,
                                      width=5, textvariable=reset_move,
                                      command=lambda n=i: self.on_channel_changed(n))
-            place(reset_spin, 8)
+            place(reset_spin, 9)
             self._commit_on(reset_spin,
                             lambda _e, n=i: self.on_channel_changed(n))
 
             bar = ttk.Progressbar(grid, maximum=1000)
-            place(bar, 9, sticky="ew")
+            place(bar, 10, sticky="ew")
 
             val = ttk.Label(grid, text="—", anchor="e", width=14)
-            place(val, 10, sticky="e")
+            place(val, 11, sticky="e")
 
             place(ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
-                            foreground=self.pal["muted"]), 11)
+                            foreground=self.pal["muted"]), 12)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
                                     "steps": steps, "bar": bar, "val": val,
                                     "spin": spin, "steps_spin": steps_spin,
                                     "dev": dev, "fixed_us": fixed_us,
                                     "fixed_spin": fixed_spin,
+                                    "guard": guard, "guard_spin": guard_spin,
                                     "reset_ch": reset_ch, "reset_move": reset_move,
                                     "reset_combo": reset_combo,
                                     "reset_spin": reset_spin})
@@ -1113,6 +1123,16 @@ class App(tk.Tk):
             w["steps"].set(self.NO_INDEX)
             w["steps_spin"].config(state="disabled")
 
+        # A guard only means anything where there is a discrete press to
+        # hold shut. An axis has no such moment, so the box would be a mute
+        # rather than a guard, and it stays locked.
+        if ch.src in gp.GUARDED_SOURCES:
+            w["guard_spin"].config(state="normal")
+            w["guard"].set(str(ch.guard))
+        else:
+            w["guard"].set(self.NO_INDEX)
+            w["guard_spin"].config(state="disabled")
+
         # Only "fixed" carries a constant. Every other source takes its
         # value from an input, so the box would be a lie - "none" included,
         # which is simply centre and has nothing to set.
@@ -1155,6 +1175,7 @@ class App(tk.Tk):
             raw_steps = str(w["steps"].get()).strip().lower()
             raw_move = str(w["reset_move"].get()).strip().lower()
             raw_fixed = str(w["fixed_us"].get()).strip().lower()
+            raw_guard = str(w["guard"].get()).strip().lower()
             # The boxes read "none" for whatever the source does not use;
             # that is the widget being blanked, not a request for zero.
             new = gp.ChannelMap(
@@ -1172,6 +1193,8 @@ class App(tk.Tk):
                               min(crsf.US_MAX, int(float(raw_fixed)))))),
                 steps=old.steps if raw_steps in ("", self.NO_INDEX)
                       else max(2, min(6, int(raw_steps))),
+                guard=old.guard if raw_guard in ("", self.NO_INDEX)
+                      else max(-1, min(31, int(raw_guard))),
                 # Owned by the Outputs tab; this one must not reset them.
                 out_min=old.out_min, out_max=old.out_max,
                 reset_ch=self._reset_value(w["reset_ch"].get()),

@@ -528,6 +528,69 @@ def _check_fixed_value():
     print("   and they hold in the failsafe values too")
 
 
+def _check_guard_button():
+    """A guarded channel does not move unless the guard is held.
+
+    For an arm switch this has to hold in BOTH directions. Guarding only
+    the way in would leave the interesting failure untouched: a knock that
+    disarms in the air is worse than one that arms on the bench.
+    """
+    print("")
+    print("-- guard button --")
+    cfg = configmod.default_config()
+    cfg["channels"][4] = {"src": "toggle", "idx": 11, "guard": 5}   # CH5
+    cfg["channels"][5] = {"src": "toggle", "idx": 12}               # CH6, no guard
+    cfg["channels"][6] = {"src": "button", "idx": 13, "guard": 5}   # CH7 momentary
+    cfg["channels"][7] = {"src": "switch", "idx": 0, "steps": 3, "guard": 5}
+    m = gp.Mixer(cfg)
+    m.reset()
+
+    def frame(*down):
+        b = [False] * 16
+        for i in down:
+            b[i] = True
+        st = gp.InputState(axes=(0.0,) * 4, buttons=tuple(b), hats=((0, 0),),
+                           timestamp=time.monotonic(), connected=True)
+        v = m.compute({0: st})
+        return [crsf.crsf_to_us(v[i]) for i in (4, 5, 6, 7)]
+
+    low, high = crsf.US_MIN, crsf.US_MAX
+    assert frame() == [low, low, low, low], "everything starts low"
+
+    # The arm button on its own, twice, must do nothing at all.
+    for _ in range(2):
+        assert frame(11)[0] == low, "an unguarded press must not arm"
+        assert frame()[0] == low, "and must not arm on release either"
+    print(f"   arm button alone, twice:    CH5 = {frame()[0]:.0f} us")
+
+    # The neighbour on its own button is untouched by any of this.
+    frame(12)
+    assert frame()[1] == high, "CH6 has no guard and must still work"
+
+    frame(5, 11)
+    armed = frame(5)[0]
+    print(f"   guard + arm button:         CH5 = {armed:.0f} us")
+    assert armed == high, "guard held, the press must arm"
+
+    # And it must not be possible to disarm by accident either.
+    frame(11)
+    assert frame()[0] == high, "an unguarded press must not disarm"
+    print(f"   arm button alone again:     CH5 = {frame()[0]:.0f} us (held)")
+
+    frame(5, 11)
+    assert frame(5)[0] == low, "guard held, the press must disarm"
+    print("   guard + arm button:         disarmed")
+
+    # A momentary button reads low without the guard, and a switch keeps
+    # the position it had rather than snapping anywhere.
+    assert frame(13)[2] == low, "a guarded momentary button must read low"
+    assert frame(5, 13)[2] == high, "with the guard it must read high"
+    frame(5, 1)                       # move the switch to position 2, guarded
+    pos2 = frame(5)[3]
+    assert frame(0)[3] == pos2, "an unguarded switch must hold its position"
+    print("   momentary and switch:       both held shut")
+
+
 def main():
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
@@ -717,6 +780,7 @@ def _run(wire):
     _check_endpoints()
     _check_config_file()
     _check_fixed_value()
+    _check_guard_button()
 
     lk.stop()
     lk.join(timeout=2)
