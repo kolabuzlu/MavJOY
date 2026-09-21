@@ -676,10 +676,6 @@ class App(tk.Tk):
         mode_combo.grid(row=1, column=1, sticky="w")
         mode_combo.bind("<<ComboboxSelected>>", lambda _e: self.on_throttle_changed())
 
-        self.thr_help = ttk.Label(frm, text="", wraplength=620, justify="left",
-                                  foreground=self.pal["faint"])
-        self.thr_help.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 14))
-
         def spin(label, key, row, lo, hi, hint=""):
             ttk.Label(frm, text=label, width=14).grid(row=row, column=0, sticky="w",
                                                       pady=3)
@@ -693,11 +689,11 @@ class App(tk.Tk):
             return var
 
         self.thr_axis = spin("Up / axis", "axis", 3, -1, 31,
-                             "axis or button that raises throttle (F710 X mode: RT = axis 5)")
+                             "axis or button that raises throttle")
         self.thr_axis_dn = spin("Down", "axis_down", 4, -1, 31,
-                                "ramp mode only (LT = axis 2)")
+                                "ramp mode only")
         self.thr_cut = spin("Cut button", "cut_button", 5, -1, 31,
-                            "instantly drops throttle to idle (Back = button 6)")
+                            "instantly drops throttle to idle")
 
         ttk.Label(frm, text="Ramp rate", width=14).grid(row=6, column=0, sticky="w",
                                                         pady=3)
@@ -1035,8 +1031,7 @@ class App(tk.Tk):
         self._refresh_input_slots()
 
         if not devices:
-            self.log("warn", "No gamepad detected. Check the F710 dongle and the "
-                             "X/D switch (use X).")
+            self.log("warn", "No gamepad detected.")
 
     def on_pad_selected(self, slot=0):
         _combo, var = self._slot_widgets(slot)
@@ -1162,7 +1157,6 @@ class App(tk.Tk):
         except (tk.TclError, ValueError):
             return
         self.mixer.deadzone = self.cfg["deadzone"]
-        self.thr_help.config(text=gp.THROTTLE_MODE_HELP.get(t["mode"], ""))
         self.thr_rate_lbl.config(text=f"{t['ramp_rate']:.2f} (idle\u2192full in "
                                       f"{1.0 / max(t['ramp_rate'], 0.01):.1f}s)")
         self.thr_dz_lbl.config(text=f"{t['deadzone']:.2f}")
@@ -2168,8 +2162,7 @@ class App(tk.Tk):
     def show_about(self):
         messagebox.showinfo(
             "About",
-            f"MavJOY {VERSION}\n"
-            "F710 \u2192 CRSF \u2192 ExpressLRS\n\n"
+            f"MavJOY {VERSION}\n\n"
             "Sends CRSF RC frames to an ExpressLRS TX module over a serial port, "
             "so the module behaves exactly as if a handset were driving it.\n\n"
             "If channel data stops (gamepad unplugged, app closed), the module's "

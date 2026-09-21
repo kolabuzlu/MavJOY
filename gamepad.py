@@ -502,16 +502,6 @@ SOURCE_HELP = {
 
 THROTTLE_MODES = ("trigger", "ramp", "axis")
 
-THROTTLE_MODE_HELP = {
-    "trigger": "Analog trigger. Released = idle. You hold it for the whole flight, "
-               "but letting go always means idle.",
-    "ramp": "Ratcheting. Hold up-source to increase, down-source to decrease; the "
-            "setting stays where you left it, like a real throttle stick.",
-    "axis": "Raw stick axis. WARNING: the F710 sticks self-centre, so this means "
-            "throttle snaps to 50% whenever you let go.",
-}
-
-
 def _apply_deadzone(value: float, deadzone: float) -> float:
     if deadzone <= 0.0:
         return value
