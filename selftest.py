@@ -586,6 +586,24 @@ def _run(wire):
     telem, stats = lk.snapshot()
     print("telemetry decoded:", telem.get("link"))
     assert telem.get("link", {}).get("up_lq") == 100
+    # RSSI is a uint8 holding dBm * -1, so 45 means -45 dBm.
+    assert telem["link"]["up_rssi_1"] == -45, telem["link"]["up_rssi_1"]
+    assert telem["link"]["up_rssi"] == -45, "antenna 0 is active in this frame"
+
+    # Zero is not 0 dBm. A link that is down reports zero across the frame,
+    # and showing that as 0 dBm claims the strongest possible signal at the
+    # exact moment there is none.
+    assert crsf.parse_link_statistics(bytes(10))["up_rssi"] is None
+    # A sender that puts a signed int8 in the field instead of the magnitude
+    # must not come back as an impossible -211 dBm.
+    assert crsf.rssi_dbm(211) == -45, crsf.rssi_dbm(211)
+    # The receiver may be listening on the other antenna.
+    two = crsf.parse_link_statistics(bytes([45, 60, 100, 8, 1, 6, 5, 40, 98, 3]))
+    assert two["up_rssi"] == -60, two["up_rssi"]
+    print(f"rssi: {telem['link']['up_rssi']} dBm, "
+          f"zero -> {crsf.parse_link_statistics(bytes(10))['up_rssi']}, "
+          f"signed byte 211 -> {crsf.rssi_dbm(211)} dBm, "
+          f"antenna 1 -> {two['up_rssi']} dBm")
 
     # ---- the sensors that used to be dropped on the floor
     def sensor(ftype, payload):

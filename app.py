@@ -294,7 +294,7 @@ class App(tk.Tk):
         row2 = ttk.Frame(rows)
         row2.pack(fill="x", padx=6, pady=(0, 6))
 
-        ttk.Label(row2, text="Gamepad").pack(side="left")
+        ttk.Label(row2, text="Device 0").pack(side="left")
         self.pad_var = tk.StringVar()
         self.pad_combo = ttk.Combobox(row2, textvariable=self.pad_var,
                                       width=28, state="readonly")
@@ -360,9 +360,12 @@ class App(tk.Tk):
 
         info = ttk.Frame(status)
         info.pack(side="right")
-        self.rate_lbl = ttk.Label(info, text="\u2014 Hz", width=22, anchor="e")
+        # Wide enough for the longest reading each can show. Too narrow
+        # and the end is simply cut off, which is how "1000 mW" went
+        # missing off the right of the RF line.
+        self.rate_lbl = ttk.Label(info, text="\u2014 Hz", width=30, anchor="e")
         self.rate_lbl.pack(anchor="e")
-        self.rf_lbl = ttk.Label(info, text="no telemetry", width=34, anchor="e")
+        self.rf_lbl = ttk.Label(info, text="no telemetry", width=44, anchor="e")
         self.rf_lbl.pack(anchor="e")
 
     def _build_notebook(self):
@@ -643,19 +646,8 @@ class App(tk.Tk):
                                     "reset_spin": reset_spin})
             self._sync_row_widgets(i)
 
-        ttk.Label(tab, text="Mapping is one input to one channel. No mixing, no expo, "
-                            "no curves — do all of that on the flight controller.",
-                  foreground=self.pal["muted"]).pack(anchor="w", padx=10, pady=(10, 2))
-        ttk.Label(tab, foreground=self.pal["muted"], wraplength=900, justify="left",
-                  text="dev picks which gamepad a channel reads, for setups with a "
-                       "separate USB throttle. CH5 is the arm channel: while it "
-                       "reads high the app will not change module settings and the "
-                       "ARM light is red. That is fixed - no other channel arms, "
-                       "whatever it is mapped to, so a latch on a flight mode "
-                       "channel is just a flight mode.").pack(
-            anchor="w", padx=10, pady=(0, 2))
         self.src_help = ttk.Label(tab, text="", foreground=self.pal["faint"])
-        self.src_help.pack(anchor="w", padx=10, pady=(0, 8))
+        self.src_help.pack(anchor="w", padx=10, pady=(8, 8))
 
     # ------------------------------------------------------------ throttle
     def _build_throttle_tab(self, nb):
@@ -1814,8 +1806,13 @@ class App(tk.Tk):
                                       f"(jit {stats.jitter_ms:.1f} ms)")
             link = telem.get("link")
             if link and time.monotonic() - link.get("_t", 0) < 2.0:
+                # RSSI reads None when nothing was measured - a link that
+                # is down reports zero, and printing that as 0 dBm claims
+                # the strongest possible signal at the moment there is none.
+                rssi = link.get("up_rssi")
+                rssi_txt = f"{rssi} dBm" if rssi is not None else "no signal"
                 self.rf_lbl.config(
-                    text=f"LQ {link['up_lq']}%  RSSI {link['up_rssi_1']} dBm  "
+                    text=f"LQ {link['up_lq']}%  RSSI {rssi_txt}  "
                          f"SNR {link['up_snr']}  {link.get('tx_power_mw') or '?'} mW")
                 self._set_lq(link["up_lq"])
             else:
@@ -2000,7 +1997,8 @@ class App(tk.Tk):
             for k, v in data.items():
                 if k == "_t":
                     continue
-                lines.append(f"    {k:16s} {v}")
+                shown = "not measured" if v is None else v
+                lines.append(f"    {k:16s} {shown}")
             lines.append("")
         if not lines:
             lines = ["No telemetry received yet.", "",

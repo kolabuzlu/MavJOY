@@ -212,21 +212,50 @@ class Parser:
         return out
 
 
+def rssi_dbm(raw: int):
+    """dBm from a CRSF RSSI byte, or None when nothing was measured.
+
+    The field is a uint8 holding dBm * -1, so 45 means -45 dBm.
+
+    Zero is not 0 dBm. No receiver reports a signal that strong, and what
+    it actually means is that nothing was measured - the usual case being
+    a link that is down, where everything in the frame reads zero. Shown
+    as 0 dBm it looks like the strongest possible signal at exactly the
+    moment there is no signal at all, so it is reported as unknown.
+
+    Above 127 the byte cannot be a magnitude either: that would be -128 dBm
+    or worse, far below any receiver's floor. It is a sender that put a
+    signed int8 in the field instead of the magnitude, so it is read back
+    that way rather than turned into an impossible number.
+    """
+    raw = int(raw) & 0xFF
+    if raw == 0:
+        return None
+    if raw > 127:
+        return raw - 256
+    return -raw
+
+
 def parse_link_statistics(payload: bytes):
     """CRSF_FRAMETYPE_LINK_STATISTICS (0x14) -> dict."""
     if len(payload) < 10:
         return None
     up_rssi1, up_rssi2, up_lq, up_snr, ant, rf_mode, tx_power, \
         dn_rssi, dn_lq, dn_snr = payload[:10]
+    # Which antenna the receiver is actually listening on. On a diversity
+    # receiver the other one can be reading anything, and on a single-antenna
+    # one the second field is simply zero, so the pair is not interchangeable.
+    active = up_rssi2 if ant else up_rssi1
     return {
-        "up_rssi_1": -up_rssi1,
-        "up_rssi_2": -up_rssi2,
+        "up_rssi_1": rssi_dbm(up_rssi1),
+        "up_rssi_2": rssi_dbm(up_rssi2),
+        "up_rssi": rssi_dbm(active),      # the one worth showing
         "up_lq": up_lq,
         "up_snr": up_snr - 256 if up_snr > 127 else up_snr,
         "antenna": ant,
         "rf_mode": rf_mode,
         "tx_power_mw": _TX_POWER_TABLE.get(tx_power, None),
-        "dn_rssi": -dn_rssi,
+        "dn_rssi": rssi_dbm(dn_rssi),
         "dn_lq": dn_lq,
         "dn_snr": dn_snr - 256 if dn_snr > 127 else dn_snr,
     }

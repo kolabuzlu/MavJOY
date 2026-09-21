@@ -112,9 +112,13 @@ DEFAULT_CONFIG = {
     ],
 }
 
+# The conventional use of each channel, shown beside it. CH5 says "arm"
+# because that one is enforced - it is the arm channel and nothing else can
+# be. The rest are only conventions, so CH6 carries no label: calling it the
+# flight mode channel suggested something the app does not actually do.
 CHANNEL_HINTS = [
     "roll / aileron", "pitch / elevator", "throttle", "yaw / rudder",
-    "arm", "flight mode", "", "", "", "", "", "", "", "", "", "",
+    "arm", "", "", "", "", "", "", "", "", "", "", "",
 ]
 
 
