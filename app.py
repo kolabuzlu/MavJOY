@@ -85,6 +85,7 @@ class App(tk.Tk):
         self._arm_watch = crsf.ArmWatch(
             self.cfg.get("firmware", crsf.DEFAULT_FIRMWARE))
         self._armed_report = None           # True, False, or None for unknown
+        self._missing_port = None           # port named by config, not here
         self._mode_since = 0.0              # first flight-mode frame
         self._said_star_hint = False
         self._pending_write = None          # (field index, value) we asked for
@@ -1008,13 +1009,27 @@ class App(tk.Tk):
         labels = [f"{dev}   {desc}".strip() for dev, desc in self._ports]
         self.port_combo["values"] = labels
         wanted = self.cfg.get("port", "")
-        for i, (dev, _d) in enumerate(self._ports):
-            if dev == wanted:
-                self.port_combo.current(i)
-                break
+        here = [dev for dev, _d in self._ports]
+
+        if wanted and wanted in here:
+            self.port_combo.current(here.index(wanted))
+            self._missing_port = None
         else:
             if labels and not self.port_var.get():
                 self.port_combo.current(0)
+            # Say so, once per port. A configuration carried from another
+            # machine names the port THAT machine had; quietly selecting a
+            # different one and letting someone press Start is how a link
+            # ends up opening a Bluetooth port instead of the module.
+            if wanted and self._missing_port != wanted:
+                self._missing_port = wanted
+                got = self.selected_port()
+                self.log("warn", f"{wanted}, named by the configuration, is "
+                                 + (f"not on this machine. {got} is selected "
+                                    f"instead - check it before starting a "
+                                    f"link." if got else
+                                    "not on this machine, and no port is "
+                                    "selected."))
         if not labels:
             self.port_var.set("")
             self.log("warn", "No serial ports found.")
@@ -1060,11 +1075,17 @@ class App(tk.Tk):
 
     def _fill_gamepads(self, tries=1, announce=False):
         devices = self.gamepad.device_list
-        if not devices and tries > 1:
+        # The test device is always in the list, so it cannot be what tells
+        # us enumeration has finished - SDL takes a moment, and only real
+        # hardware appearing means it is done.
+        real = [d for d in devices if d.get("index") != gp.TEST_INDEX]
+        if not real and tries > 1:
             self.after(400, lambda: self._fill_gamepads(tries - 1))
             return
         self._devices_seq = getattr(self.gamepad, "devices_seq", 0)
-        listing = [self.NO_DEVICE] + [f"{d['index']}: {d['name']}" for d in devices]
+        listing = [self.NO_DEVICE] + [
+            d["name"] if d.get("index") == gp.TEST_INDEX
+            else f"{d['index']}: {d['name']}" for d in devices]
         wanted = self._wanted_devices()
 
         taken = []
@@ -1090,18 +1111,23 @@ class App(tk.Tk):
                 var.set(self.NO_DEVICE)
                 continue
 
-            var.set(listing[index + 1])
+            # By position in the list, not by arithmetic on the index:
+            # the test device is index -1, and index + 1 would land on
+            # "none".
+            pos = next((k for k, d in enumerate(devices)
+                        if d["index"] == index), None)
+            var.set(listing[pos + 1] if pos is not None else self.NO_DEVICE)
             entry = {"name": (found or {}).get("name", ""),
                      "guid": (found or {}).get("guid", ""),
                      "index": index}
             wanted[slot] = entry
             if announce:
-                self.log("info", f"Slot {slot}: {devices[index]['name']}")
+                self.log("info", f"Slot {slot}: {(found or {}).get('name', '?')}")
 
         self.cfg["gamepads"] = wanted
         self._refresh_input_slots()
 
-        if not devices:
+        if not real:
             self.log("warn", "No gamepad detected.")
 
     def on_pad_selected(self, slot=0):
@@ -1112,7 +1138,10 @@ class App(tk.Tk):
             wanted[slot] = None
             self.gamepad.select(None, slot)
         else:
-            index = int(label.split(":", 1)[0])
+            # The test device is listed by name alone; everything else is
+            # prefixed with its index.
+            index = (gp.TEST_INDEX if label == gp.TEST_NAME
+                     else int(label.split(":", 1)[0]))
             self.gamepad.select(index, slot)
             entry = self.gamepad.identity(slot) or {}
             entry["index"] = index
@@ -1228,7 +1257,11 @@ class App(tk.Tk):
                 guard=old.guard if raw_guard in ("", self.NO_INDEX)
                       else max(-1, min(31, int(raw_guard))),
                 # Owned by the Outputs tab; this one must not reset them.
-                out_min=old.out_min, out_max=old.out_max,
+                # All three: leaving one out means every mapping edit - and
+                # every Save, which edits all sixteen - quietly puts it back
+                # to its default.
+                out_min=old.out_min, out_mid=old.out_mid,
+                out_max=old.out_max,
                 reset_ch=self._reset_value(w["reset_ch"].get()),
                 # "none" here is the box being blanked for a source that has
                 # no latch, exactly as for index and steps - not a value.
@@ -1709,6 +1742,15 @@ class App(tk.Tk):
             concerns.append(f"CH{n} armed")
         if self._model_armed():
             concerns.append("the model reports it is armed")
+        # Worth saying out loud. The test device never moves, so every
+        # channel it feeds sits wherever a centred stick puts it and no
+        # control will answer - which is fine on a bench and not fine
+        # anywhere else.
+        for slot in sorted(self.mixer.required_devices()):
+            ident = self.gamepad.identity(slot) or {}
+            if ident.get("guid") == gp.TEST_GUID:
+                concerns.append(f"device {slot} is the test device, which "
+                                f"never moves")
         return concerns
 
     def _confirm_first_frame(self):
@@ -2225,13 +2267,28 @@ class App(tk.Tk):
             return
         self.cfg = cfg
         self._apply_config_to_widgets()
-        self.refresh_gamepads()
         try:
             configmod.save(self.cfg)
         except Exception as exc:
             messagebox.showerror("Saving the imported configuration failed",
                                  str(exc))
         self.log("info", f"Configuration imported from {path}")
+
+        # The Log is the wrong place for this one. Importing is a deliberate
+        # act, and the port is the thing that can be quietly wrong afterwards
+        # and still let a link start: a missing gamepad stops Start with its
+        # own message, while a substituted port opens perfectly happily and
+        # talks to whatever is on it.
+        asked = cfg.get("port", "")
+        got = self.selected_port()
+        if asked and got != asked:
+            messagebox.showwarning(
+                "Serial port not available",
+                f"This configuration was saved with {asked}, which is not on "
+                f"this machine.\n\n"
+                + (f"{got} has been selected instead. Check it is the module "
+                   f"before starting a link." if got else
+                   "No serial port is selected."))
 
     def save_config(self):
         try:
@@ -2289,6 +2346,33 @@ class App(tk.Tk):
         self.rate_auto.set(bool(self.cfg.get("rate_auto", True)))
         self._on_rate_auto()
         self.on_throttle_changed()
+
+        # Which firmware the telemetry is read as. Applying the rest and
+        # leaving this behind is worse than not carrying it at all: the
+        # config would say INAV while the app went on reading ArduPilot's
+        # rules, and nothing on screen would say so.
+        fw = self.cfg.get("firmware", crsf.DEFAULT_FIRMWARE)
+        if fw not in crsf.FIRMWARES:
+            fw = crsf.DEFAULT_FIRMWARE
+        self.firmware.set(self.FIRMWARE_LABELS[fw])
+        self._arm_watch = crsf.ArmWatch(fw)
+        self._armed_report = None
+        self._said_star_hint = False
+        self._mode_since = 0.0
+
+        # The port and the devices come from the file too. refresh_ports
+        # already picks out cfg["port"] if it is there, and refresh_gamepads
+        # re-resolves each slot by identity.
+        #
+        # Forget which port was last complained about first. That memory
+        # stops the refresh button repeating itself, but loading a
+        # configuration is a deliberate act and deserves its own answer -
+        # otherwise importing a file naming the same absent port as the one
+        # already loaded says nothing at all, which is exactly when someone
+        # most needs telling.
+        self._missing_port = None
+        self.refresh_ports()
+        self.refresh_gamepads()
 
     def show_about(self):
         messagebox.showinfo(

@@ -500,6 +500,7 @@ def _check_config_file():
     cfg["channels"][5] = {"src": "oneway", "idx": 3, "out_max": 1900,
                           "reset_ch": 1, "reset_move": 120}
     cfg["throttle"]["mode"] = "ramp"
+    cfg["firmware"] = "inav"
     cfg["latches"] = {"5": {"src": "toggle", "state": True}}
 
     path = os.path.join(tempfile.gettempdir(), "mavjoy_export_test.mavjoy.json")
@@ -508,21 +509,35 @@ def _check_config_file():
     print(f"   exported {len(raw)} keys, marker {raw.get('mavjoy_config')}")
     assert "latches" not in raw, "latch positions must not be exported"
 
+    # Everything else must be there, or "import and fly" is not true.
+    for key in ("firmware", "port", "baud", "rate_hz", "throttle", "channels"):
+        assert key in raw, f"{key} must travel with an exported config"
+
     back = configmod.read_file(path)
     os.unlink(path)
+    assert back["latches"] == {}, "latches must not come back either"
     print(f"   baud {back['baud']}   rate {back['rate_hz']}   "
           f"throttle {back['throttle']['mode']}")
     print(f"   CH6 {back['channels'][5]}")
     assert back["baud"] == 921600
     assert back["rate_hz"] == 333
     assert back["throttle"]["mode"] == "ramp"
-    assert back["latches"] == {}, "latches must not come back either"
+
+    assert back["firmware"] == "inav", "the firmware must survive the trip"
 
     # The mixer built from the imported file must behave like the original.
     a, b = gp.Mixer(cfg), gp.Mixer(back)
     for i in range(crsf.NUM_CHANNELS):
         assert a.channels[i].to_dict() == b.channels[i].to_dict(), (
             f"CH{i + 1} differs after the round trip")
+
+    # An output midpoint has to survive a mapping edit as well as a file.
+    # It did not: on_channel_changed carried out_min and out_max across and
+    # left out_mid behind, so every edit - and every Save, which edits all
+    # sixteen - quietly put the midpoint back to centre.
+    ch = gp.ChannelMap.from_dict({"src": "axis", "idx": 0, "out_min": 1100,
+                                  "out_mid": 1550, "out_max": 1900})
+    assert ch.to_dict()["out_mid"] == 1550, "a midpoint must survive to_dict"
     print(f"   all {crsf.NUM_CHANNELS} channels identical after the round trip")
 
     for body, why in ((b"not json at all", "garbage"),

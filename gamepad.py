@@ -65,6 +65,35 @@ class InputState:
 _BLANK_STATE = InputState()
 
 
+# A device that is always present and never moves. It exists so the serial
+# side can be exercised with nothing plugged in: pick it and a link will
+# start, with every channel sitting where the map puts a centred stick and
+# no buttons pressed.
+#
+# It is deliberately dead. A test device that swept its axes would be a
+# better test of the RF chain and a far worse idea: it would command a real
+# aircraft, and the whole point of reaching for it is that the hardware you
+# would have checked against is not there.
+TEST_INDEX = -1
+TEST_NAME = "Test device (no input)"
+TEST_GUID = "mavjoy-test"
+TEST_AXES = 8
+TEST_BUTTONS = 16
+
+
+def test_device():
+    return {"index": TEST_INDEX, "name": TEST_NAME, "guid": TEST_GUID}
+
+
+def test_state():
+    return InputState(axes=(0.0,) * TEST_AXES,
+                      buttons=(False,) * TEST_BUTTONS,
+                      hats=((0, 0),),
+                      timestamp=time.monotonic(),
+                      device_name=TEST_NAME,
+                      connected=True)
+
+
 class GamepadThread(threading.Thread):
     """Owns pygame and polls every selected device, publishing one InputState
     per slot.
@@ -88,6 +117,7 @@ class GamepadThread(threading.Thread):
         self._rescan = threading.Event()
         self._stop_event = threading.Event()
         self._joys = {}              # slot -> pygame joystick
+        self._virtual = set()        # slots holding the test device
         self._open_index = {}        # slot -> device index actually open
         self.error = ""
 
@@ -216,7 +246,13 @@ class GamepadThread(threading.Thread):
             # would leave a slot reporting hardware that is gone. get_count()
             # is a cheap SDL call and it disagrees the moment a device goes.
             try:
-                if pygame.joystick.get_count() != len(self._devices):
+                # Against the REAL devices only. The test device is in the
+                # list but not in SDL's count, so comparing the whole list
+                # would disagree on every pass and tear the subsystem down
+                # and back up at the polling rate, for ever.
+                real = sum(1 for d in self._devices
+                           if d["index"] != TEST_INDEX)
+                if pygame.joystick.get_count() != real:
                     self._rescan.set()
             except Exception:
                 pass
@@ -252,6 +288,7 @@ class GamepadThread(threading.Thread):
         pygame.joystick.init()
         self._joys = {}
         self._open_index = {}
+        self._virtual = set()
         devices = []
         for i in range(pygame.joystick.get_count()):
             name, guid = f"device {i}", ""
@@ -261,6 +298,8 @@ class GamepadThread(threading.Thread):
             except Exception:
                 pass
             devices.append({"index": i, "name": name, "guid": guid})
+        # Last, so it is never what a fresh config falls onto by position.
+        devices.append(test_device())
         with self._lock:
             if devices != self._devices:
                 self.devices_seq += 1
@@ -330,6 +369,12 @@ class GamepadThread(threading.Thread):
         self._close(slot)
         if index is None:
             return
+        if index == TEST_INDEX:
+            # Nothing to open: it is answered from _poll instead.
+            self._virtual.add(slot)
+            self._open_index[slot] = index
+            self.error = ""
+            return
         try:
             joy = pygame.joystick.Joystick(index)
             joy.init()
@@ -340,6 +385,7 @@ class GamepadThread(threading.Thread):
             self.error = f"could not open gamepad {index}: {exc}"
 
     def _close(self, slot):
+        self._virtual.discard(slot)
         joy = self._joys.pop(slot, None)
         if joy is not None:
             try:
@@ -354,7 +400,10 @@ class GamepadThread(threading.Thread):
 
     def _poll(self):
         fresh = {}
-        for slot in set(self._wanted) | set(self._joys):
+        for slot in set(self._wanted) | set(self._joys) | self._virtual:
+            if slot in self._virtual:
+                fresh[slot] = test_state()
+                continue
             joy = self._joys.get(slot)
             if joy is None:
                 fresh[slot] = InputState(connected=False,
