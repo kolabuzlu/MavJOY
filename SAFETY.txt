@@ -1,4 +1,4 @@
-MavJOY 1.0.0
+MavJOY 1.0.1
 ============
 
 MavJOY turns a USB gamepad into an RC transmitter. It drives a real
@@ -63,9 +63,17 @@ ARMING
   MavJOY refuses to change module settings.
 
   The ARM banner shows what the AIRCRAFT reports, not what CH5 is doing.
-  CRSF has no armed frame, so this is read from a star appended to the
-  flight mode name while disarmed. On ArduPilot, set RC_OPTIONS bit 12
-  (add 4096) or the banner has nothing to read and stays grey.
+  CRSF has no armed frame, so each firmware says it differently - pick
+  yours with the Firmware selector on the status bar BEFORE connecting.
+
+    ArduPilot  appends a star to the flight mode name while disarmed, and
+               only with RC_OPTIONS bit 12 set (add 4096). Without that
+               parameter the banner has nothing to read and stays grey.
+
+    INAV       sends a real mode name only while armed, and OK, WAIT or
+               !ERR while disarmed. Nothing to set up, and it is known
+               from the first frame. "OK" on the ground is correct: it
+               means disarmed with nothing wrong, not a fault.
 
 
 FILES

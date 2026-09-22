@@ -31,7 +31,7 @@ REFRESH_MS = 50          # GUI refresh, 20 Hz
 BAR_LEN = 150
 
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 def fmt_channel(value: int) -> str:
@@ -81,7 +81,9 @@ class App(tk.Tk):
         self._cmd_index = None              # command currently running
         self._telem_last = ""               # last telemetry text drawn
         self._last_mode = None              # last flight-mode frame decoded
-        self._arm_watch = crsf.ArmWatch()   # reads armed from the mode name
+        # Reads armed from the mode name, the way this firmware writes it.
+        self._arm_watch = crsf.ArmWatch(
+            self.cfg.get("firmware", crsf.DEFAULT_FIRMWARE))
         self._armed_report = None           # True, False, or None for unknown
         self._mode_since = 0.0              # first flight-mode frame
         self._said_star_hint = False
@@ -349,6 +351,23 @@ class App(tk.Tk):
                                  bg=self.pal["idle"], fg=self.pal["on_accent"],
                                  padx=8, pady=8)
         self.mode_lbl.pack(side="left", padx=(8, 0))
+
+        # Which firmware is flying. Set it before starting a link: it is how
+        # the telemetry above is read, not something sent to the model.
+        fw = ttk.Frame(status)
+        fw.pack(side="left", padx=(12, 0))
+        ttk.Label(fw, text="Firmware", foreground=self.pal["muted"]).pack(
+            anchor="w")
+        self.firmware = tk.StringVar(
+            value=self.FIRMWARE_LABELS.get(
+                self.cfg.get("firmware", crsf.DEFAULT_FIRMWARE),
+                self.FIRMWARE_LABELS[crsf.DEFAULT_FIRMWARE]))
+        fw_combo = ttk.Combobox(fw, textvariable=self.firmware, width=10,
+                                state="readonly",
+                                values=list(self.FIRMWARE_LABELS.values()))
+        fw_combo.pack(anchor="w")
+        fw_combo.bind("<<ComboboxSelected>>",
+                      lambda _e: self.on_firmware_changed())
 
         thr_frame = ttk.Frame(status)
         thr_frame.pack(side="left", padx=16)
@@ -1993,6 +2012,30 @@ class App(tk.Tk):
     MODE_STALE = 3.0
     MODE_MAX_CHARS = 10
 
+    FIRMWARE_LABELS = {"ardupilot": "ArduPilot", "inav": "INAV"}
+
+    def on_firmware_changed(self):
+        """Read the telemetry the way the chosen firmware writes it."""
+        chosen = {v: k for k, v in self.FIRMWARE_LABELS.items()}.get(
+            self.firmware.get(), crsf.DEFAULT_FIRMWARE)
+        if chosen == self.cfg.get("firmware"):
+            return
+        self.cfg["firmware"] = chosen
+        # Start the watcher again: what it had learned was learned under the
+        # other firmware's rules and means nothing under these.
+        self._arm_watch = crsf.ArmWatch(chosen)
+        self._armed_report = None
+        self._said_star_hint = False
+        self._mode_since = 0.0
+        try:
+            saved, _warning = configmod.load()
+            saved["firmware"] = chosen
+            configmod.save(saved)
+        except Exception as exc:
+            self.log("warn", f"Could not save the firmware setting: {exc}")
+        self.log("info", f"Telemetry now read as "
+                         f"{self.FIRMWARE_LABELS[chosen]}.")
+
     # The model has to have been seen marking a disarm before the absence
     # of that mark means anything.
     STAR_HINT_AFTER = 10.0
@@ -2036,6 +2079,11 @@ class App(tk.Tk):
 
     def _hint_disarm_star(self, fresh):
         """Say once why the arm chip is blank, when it is worth saying."""
+        # ArduPilot's marker, and ArduPilot's parameter. INAV needs neither:
+        # it says disarmed in the mode name itself, so there is nothing
+        # missing to complain about.
+        if self._arm_watch.firmware != "ardupilot":
+            return
         if self._said_star_hint or not fresh or self._arm_watch.marker_seen:
             return
         if time.monotonic() - self._mode_since < self.STAR_HINT_AFTER:

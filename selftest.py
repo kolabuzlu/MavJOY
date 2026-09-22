@@ -331,6 +331,28 @@ def _check_arm_from_model():
 
     assert w.feed(None) is None, "losing telemetry must not read as armed"
 
+    # INAV says it differently. Its armed branch is checked first and always
+    # replaces the string with a real mode, so OK, WAIT and !ERR are
+    # reachable only on the ground - and it appends no star, which is why
+    # reading it with ArduPilot's rules leaves the arm state unknown for
+    # ever.
+    print("   -- as INAV --")
+    inav = crsf.ArmWatch("inav")
+    for mode, want in (("OK", False), ("WAIT", False), ("!ERR", False),
+                       ("ANGL", True), ("RTH", True), ("MANU", True)):
+        got = inav.feed(crsf.parse_flight_mode(mode.encode() + bytes([0])))
+        print(f"   {mode:6} -> {{True: 'ARMED', False: 'DISARMED'}}[got]"
+              .replace("{True: 'ARMED', False: 'DISARMED'}[got]",
+                       "ARMED" if got else "DISARMED"))
+        assert got is want, f"INAV {mode} should be {want}, got {got}"
+    assert inav.feed(None) is None, "no telemetry is still unknown"
+
+    # And the same strings under ArduPilot's rules must NOT be read as
+    # disarmed: there, a name without a star means nothing on its own.
+    assert crsf.ArmWatch("ardupilot").feed(
+        crsf.parse_flight_mode(b"OK" + bytes([0]))) is None, (
+        "OK is an INAV convention and must not be read as one elsewhere")
+
 
 def _check_latch_memory():
     """Latching channels come back where they were left, CH1-4 excepted.

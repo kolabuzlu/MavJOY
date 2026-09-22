@@ -69,6 +69,9 @@ DEFAULT_CONFIG = {
     "sync_byte": 0xC8,
     # One entry per device slot: slot 0 is the sticks, slot 1 can be a
     # separate USB throttle. null leaves a slot empty.
+    # Which firmware is flying. The telemetry frames are the same either
+    # way, but the two say "armed" differently - see crsf.ArmWatch.
+    "firmware": "ardupilot",
     "gamepads": [0, None],
     # Latch positions carried over from the last run, keyed by channel
     # number. Written when the app closes, not by Save, because it is a

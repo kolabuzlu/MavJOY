@@ -335,28 +335,52 @@ def parse_flight_mode(payload: bytes):
     return {"mode": mode, "disarm_star": disarm_star}
 
 
+# The two firmwares this app is flown with. They send the same telemetry
+# frames, but say "armed" in different ways - see ArmWatch.
+FIRMWARES = ("ardupilot", "inav")
+DEFAULT_FIRMWARE = "ardupilot"
+
+# What INAV puts in the flight mode field while DISARMED. Its armed branch
+# is checked first and always replaces the string with a real mode, so
+# these three are reachable only on the ground: "OK" for nothing wrong,
+# "WAIT" waiting on a GPS fix, "!ERR" arming refused.
+INAV_DISARMED = ("OK", "WAIT", "!ERR")
+
+
 class ArmWatch:
-    """Reads armed state out of the flight-mode convention, or admits it cannot.
+    """Reads armed state out of the flight mode, the way a firmware says it.
 
-    CRSF has no armed frame. Senders append a star to the mode name while
-    DISARMED, and ArduPilot only does that with RC_OPTIONS bit 12 set, so a
-    single frame without a star proves nothing: it is as consistent with a
-    sender that never marks a disarm as with a model in the air.
+    CRSF carries no armed frame, and the two firmwares work around that
+    differently, so the same bytes mean different things depending on what
+    is flying.
 
-    Once a star HAS been seen the marker is known to be in use, and from
-    then on its absence means armed. A model sits disarmed on the ground
-    before it flies, so that is learned in the normal course of things - and
-    until it is, this says None rather than guessing. An arm indicator that
+    ArduPilot appends a star to the mode name while DISARMED, and only with
+    RC_OPTIONS bit 12 set - so a single frame without one proves nothing: it
+    is as consistent with a sender that never marks a disarm as with a model
+    in the air. Once a star HAS been seen the marker is known to be in use
+    and its absence means armed. A model sits disarmed on the ground before
+    it flies, so that is learned in the normal course of things; until it
+    is, this says None rather than guessing, because an arm indicator that
     reads DISARMED because it cannot tell is worse than none at all.
+
+    INAV appends nothing, and needs nothing: it sends a mode name only when
+    armed, and one of three fixed strings when it is not. So the answer is
+    known from the very first frame, and there is nothing to wait for.
     """
 
-    def __init__(self):
+    def __init__(self, firmware=DEFAULT_FIRMWARE):
+        self.firmware = firmware if firmware in FIRMWARES else DEFAULT_FIRMWARE
         self.marker_seen = False
 
     def feed(self, mode_data):
         """Take a decoded flight-mode dict (or None) -> True, False or None."""
         if not mode_data:
             return None
+
+        if self.firmware == "inav":
+            mode = str(mode_data.get("mode", "")).strip().upper()
+            return bool(mode) and mode not in INAV_DISARMED
+
         if mode_data.get("disarm_star"):
             self.marker_seen = True
             return False
