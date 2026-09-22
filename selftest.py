@@ -744,6 +744,24 @@ def _run(wire):
     telem, stats = lk.snapshot()
     print("telemetry decoded:", telem.get("link"))
     assert telem.get("link", {}).get("up_lq") == 100
+
+    # Battery fields are SIGNED, every one of them. A flight controller with
+    # no battery monitor reports small negatives from sensor noise, and read
+    # unsigned those came back as 6553.5 A and 16777192 mAh - readings
+    # alarming enough to abort a flight over, from an aircraft sitting still.
+    noise = crsf.parse_battery(bytes([0x00, 0x03, 0xFF, 0xFF,
+                                      0xFF, 0xFF, 0xE8, 0x64]))
+    assert noise["current"] == -0.1, noise["current"]
+    assert noise["capacity_used"] == -24, noise["capacity_used"]
+    assert noise["voltage"] == 0.3, noise["voltage"]
+    real = crsf.parse_battery((1250).to_bytes(2, "big")
+                              + (125).to_bytes(2, "big")
+                              + (480).to_bytes(3, "big") + bytes([62]))
+    assert real == {"voltage": 125.0, "current": 12.5,
+                    "capacity_used": 480, "remaining": 62}, real
+    print(f"battery: noise frame -> {noise['current']} A, "
+          f"{noise['capacity_used']} mAh; real pack -> {real['voltage']} V, "
+          f"{real['current']} A")
     # RSSI is a uint8 holding dBm * -1, so 45 means -45 dBm.
     assert telem["link"]["up_rssi_1"] == -45, telem["link"]["up_rssi_1"]
     assert telem["link"]["up_rssi"] == -45, "antenna 0 is active in this frame"

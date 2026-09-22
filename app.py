@@ -87,6 +87,8 @@ class App(tk.Tk):
         self._armed_report = None           # True, False, or None for unknown
         self._missing_port = None           # port named by config, not here
         self._fc_talking = False            # anything arriving from the FC
+        self._held_from_drop = None         # values a dropped link left behind
+        self._telem_gap = {}                # key -> [last _t, last gap, worst]
         self._mode_since = 0.0              # first flight-mode frame
         self._said_star_hint = False
         self._pending_write = None          # (field index, value) we asked for
@@ -353,6 +355,14 @@ class App(tk.Tk):
                                  bg=self.pal["idle"], fg=self.pal["on_accent"],
                                  padx=8, pady=8)
         self.mode_lbl.pack(side="left", padx=(8, 0))
+
+        # What the module says it is actually transmitting at, out of
+        # its link statistics - not what was asked for in the settings.
+        self.pwr_lbl = tk.Label(status, text="PWR: \u2014", width=14,
+                                font=("TkDefaultFont", 13, "bold"),
+                                bg=self.pal["idle"], fg=self.pal["on_accent"],
+                                padx=8, pady=8)
+        self.pwr_lbl.pack(side="left", padx=(8, 0))
 
         # Which firmware is flying. Set it before starting a link: it is how
         # the telemetry above is read, not something sent to the model.
@@ -1332,6 +1342,18 @@ class App(tk.Tk):
                     "anyway to test the link itself?"):
                 return
 
+        # Before the controls are read for the confirmation, so that what
+        # it shows is what will actually go out. A link that fell over gets
+        # the same treatment as input that came back: the switches hold
+        # where the model last had them, and the sticks do not.
+        if self._held_from_drop is not None:
+            self.mixer.hold_on_resume(self._held_from_drop)
+            self._held_from_drop = None
+            self.log("warn", "The link dropped rather than being stopped, so "
+                             "every switch channel holds the value the model "
+                             "last received until you move it. The sticks are "
+                             "live straight away.")
+
         # Nothing here forces a control to a "safe" value. Clearing the
         # latches would put arm low and the throttle at idle in the very
         # first frame, and when the link is being restarted to recover a
@@ -1832,6 +1854,15 @@ class App(tk.Tk):
 
     def stop_link(self, reason=""):
         if self.link:
+            # A link that ENDED rather than being stopped - the module
+            # unplugged, a write failed - leaves the model in failsafe with
+            # the controls free to be moved before it is back. Keep what the
+            # model last actually received, so the next start can freeze
+            # there instead of handing over whatever the switches read by
+            # then. A deliberate Stop carries a reason and keeps nothing:
+            # that is someone setting up, not a link that fell over.
+            if not reason and self.link.stats.frames_sent > 0:
+                self._held_from_drop = list(self.mixer.last_values)
             self.link.stop()
             self.link.join(timeout=1.0)
             self.link = None
@@ -1953,9 +1984,11 @@ class App(tk.Tk):
                     text=f"LQ {link['up_lq']}%  RSSI {rssi_txt}  "
                          f"SNR {link['up_snr']}  {link.get('tx_power_mw') or '?'} mW")
                 self._set_lq(link["up_lq"])
+                self._set_power(link.get("tx_power_mw"))
             else:
                 self.rf_lbl.config(text="no telemetry")
                 self._set_lq(None)
+                self._set_power(None)
             self._last_mode = telem.get("mode")
             self._fc_talking = self._fc_is_talking(telem)
             self._set_mode(self._last_mode)
@@ -1976,6 +2009,7 @@ class App(tk.Tk):
             self.rate_lbl.config(text="\u2014 Hz")
             self.rf_lbl.config(text="no telemetry")
             self._set_lq(None)
+            self._set_power(None)
             self._last_mode = None
             self._fc_talking = False
             self._set_mode(None)
@@ -2176,6 +2210,20 @@ class App(tk.Tk):
         self.mode_lbl.config(text=f"MODE: {name[:self.MODE_MAX_CHARS]}",
                              bg=self.pal["ok"])
 
+    def _set_power(self, mw):
+        """Paint the transmit-power chip with what the module reports.
+
+        None covers both "no telemetry" and a power index this app does not
+        have a figure for, and both mean the same thing here: not known.
+        Guessing would be worse - the difference between 25 mW and 1 W is
+        the difference between a bench test and an aerial.
+        """
+        if mw is None:
+            self.pwr_lbl.config(text="PWR: —", bg=self.pal["idle"])
+            return
+        shown = f"{mw / 1000:g} W" if mw >= 1000 else f"{mw:g} mW"
+        self.pwr_lbl.config(text=f"PWR: {shown}", bg=self.pal["ok"])
+
     def _update_telemetry(self, telem, stats):
         lines = []
         now = time.monotonic()
@@ -2184,16 +2232,40 @@ class App(tk.Tk):
             data = telem.get(key)
             if not data:
                 continue
-            age = now - data.get("_t", now)
+            stamp = data.get("_t", now)
+            age = now - stamp
+
+            # How often this frame actually turns up. The banners are only
+            # ever as current as their slowest source, so when one of them
+            # looks unresponsive this is the number that says why - and
+            # whether it is the app or the telemetry ratio at fault.
+            seen = self._telem_gap.setdefault(key, [stamp, None, 0.0])
+            if stamp > seen[0]:
+                seen[1] = stamp - seen[0]
+                seen[2] = max(seen[2], seen[1])
+                seen[0] = stamp
+            rate = ""
+            if seen[1]:
+                rate = f", every ~{seen[1]:.1f}s, worst {seen[2]:.1f}s"
+
             if key == "unknown":
                 lines.append(f"[sensors this app cannot decode yet]  "
-                             f"({age:.1f}s ago)")
+                             f"({age:.1f}s ago{rate})")
             else:
-                lines.append(f"[{key}]  ({age:.1f}s ago)")
+                lines.append(f"[{key}]  ({age:.1f}s ago{rate})")
             for k, v in data.items():
                 if k == "_t":
                     continue
-                shown = "not measured" if v is None else v
+                if v is None:
+                    shown = "not measured"
+                elif isinstance(v, float):
+                    # Degrees out of a radian conversion carry seventeen
+                    # digits of float noise, none of it measurement.
+                    # Coordinates are the exception: the seventh decimal is
+                    # about a centimetre and is real.
+                    shown = f"{v:.7f}" if k in ("lat", "lon") else f"{v:.2f}"
+                else:
+                    shown = v
                 lines.append(f"    {k:16s} {shown}")
             lines.append("")
         if not lines:

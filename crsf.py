@@ -268,10 +268,16 @@ def parse_battery(payload: bytes):
     """CRSF_FRAMETYPE_BATTERY_SENSOR (0x08) -> dict. All big-endian."""
     if len(payload) < 8:
         return None
-    voltage = int.from_bytes(payload[0:2], "big") / 10.0      # 0.1V
-    current = int.from_bytes(payload[2:4], "big") / 10.0      # 0.1A
-    capacity = int.from_bytes(payload[4:7], "big")            # mAh used
-    remaining = payload[7]                                    # %
+    # Signed, every one of them. The spec says int16 volts, int16 amps,
+    # int24 mAh and int8 percent, and a flight controller with no battery
+    # monitor reports small negative numbers from sensor noise. Read
+    # unsigned, a current of -0.1 A came back as 6553.5 A and 24 mAh of
+    # drift as 16777192 mAh - readings alarming enough to abort a flight
+    # over, from an aircraft that was sitting still.
+    voltage = int.from_bytes(payload[0:2], "big", signed=True) / 10.0   # 0.1V
+    current = int.from_bytes(payload[2:4], "big", signed=True) / 10.0   # 0.1A
+    capacity = int.from_bytes(payload[4:7], "big", signed=True)         # mAh
+    remaining = int.from_bytes(payload[7:8], "big", signed=True)        # %
     return {"voltage": voltage, "current": current,
             "capacity_used": capacity, "remaining": remaining}
 
