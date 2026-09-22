@@ -64,7 +64,7 @@ class App(tk.Tk):
     def __init__(self, simulate=False):
         claim_taskbar_identity()        # before the window exists
         super().__init__()
-        self.title("MavJOY")
+        self.title(f"MavJOY V{VERSION}")
         self.geometry("1000x760")
         self.minsize(900, 700)
 
