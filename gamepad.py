@@ -611,6 +611,7 @@ class ChannelMap:
     steps: int = 3                 # positions, for "cycle" and "switch"
     guard: int = -1                # button that must be held to change it
     out_min: int = crsf.US_MIN     # endpoint, in microseconds
+    out_mid: int = crsf.US_MID     # where centre sits, in microseconds
     out_max: int = crsf.US_MAX     # endpoint, in microseconds
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
 
@@ -626,8 +627,16 @@ class ChannelMap:
                          else crsf.clamp_channel(crsf.us_to_crsf(self.out_min)))
         self.hi_units = (crsf.CHANNEL_MAX if self.out_max >= crsf.US_MAX
                          else crsf.clamp_channel(crsf.us_to_crsf(self.out_max)))
-        self.full_travel = (self.lo_units == crsf.CHANNEL_MIN
-                            and self.hi_units == crsf.CHANNEL_MAX)
+        self.mid_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_mid))
+        # Held inside the endpoints, so travel stays in one direction. A
+        # centre outside them would run one half of the throw backwards,
+        # which is not a trim, it is a fault nobody asked for.
+        low, high = min(self.lo_units, self.hi_units), max(self.lo_units,
+                                                           self.hi_units)
+        self.mid_units = max(low, min(high, self.mid_units))
+        self.untouched = (self.lo_units == crsf.CHANNEL_MIN
+                          and self.hi_units == crsf.CHANNEL_MAX
+                          and self.mid_units == crsf.CHANNEL_MID)
 
     def switch_buttons(self):
         """The buttons a switch watches, one per position.
@@ -651,6 +660,7 @@ class ChannelMap:
                    steps=int(d.get("steps", 3)),
                    guard=int(d.get("guard", -1)),
                    out_min=_endpoint(d.get("out_min"), crsf.US_MIN),
+                   out_mid=_endpoint(d.get("out_mid"), crsf.US_MID),
                    out_max=_endpoint(d.get("out_max"), crsf.US_MAX),
                    buttons=tuple(d.get("buttons") or ()))
 
@@ -659,7 +669,8 @@ class ChannelMap:
                "dev": self.dev,
                "reset_ch": self.reset_ch, "reset_move": self.reset_move,
                "value": self.value, "steps": self.steps, "guard": self.guard,
-               "out_min": self.out_min, "out_max": self.out_max}
+               "out_min": self.out_min, "out_mid": self.out_mid,
+               "out_max": self.out_max}
         if self.buttons:
             out["buttons"] = list(self.buttons)
         return out
@@ -794,10 +805,11 @@ class Mixer:
         works in full travel and this is where full travel is told what it
         is worth in microseconds.
 
-        Centre is held at 1500 and the two halves are scaled independently,
-        the way a handset's output limits work. Scaling the whole range
-        instead would drag neutral along with the endpoint, so trimming the
-        top of an aileron throw would leave the model in a permanent turn.
+        A centred stick lands on the midpoint and each half is scaled onto
+        its own end independently, the way a handset's output limits and
+        subtrim work together. Scaling the whole range instead would drag
+        neutral along with the endpoint, so trimming the top of an aileron
+        throw would leave the model in a permanent turn.
 
         The result is returned rather than written back, because the full
         travel values are what the next frame reasons from - feeding scaled
@@ -806,18 +818,18 @@ class Mixer:
         """
         out = list(vals)
         for i, ch in enumerate(self.channels):
-            if ch.full_travel or i >= len(out):
+            if ch.untouched or i >= len(out):
                 continue
             v = out[i]
             if v >= crsf.CHANNEL_MID:
                 span = crsf.CHANNEL_MAX - crsf.CHANNEL_MID
-                out[i] = crsf.CHANNEL_MID + round(
-                    (v - crsf.CHANNEL_MID) * (ch.hi_units - crsf.CHANNEL_MID)
+                out[i] = ch.mid_units + round(
+                    (v - crsf.CHANNEL_MID) * (ch.hi_units - ch.mid_units)
                     / span)
             else:
                 span = crsf.CHANNEL_MID - crsf.CHANNEL_MIN
-                out[i] = crsf.CHANNEL_MID - round(
-                    (crsf.CHANNEL_MID - v) * (crsf.CHANNEL_MID - ch.lo_units)
+                out[i] = ch.mid_units - round(
+                    (crsf.CHANNEL_MID - v) * (ch.mid_units - ch.lo_units)
                     / span)
             out[i] = crsf.clamp_channel(out[i])
         return out

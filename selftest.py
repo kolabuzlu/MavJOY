@@ -427,6 +427,29 @@ def _check_endpoints():
     assert abs(crsf.crsf_to_us(frame(0.0)[0]) - 1500) < 2, (
         "centre must not move when an endpoint does")
 
+    # And the midpoint moves centre without touching either end.
+    trimmed = configmod.default_config()
+    trimmed["channels"][0] = {"src": "axis", "idx": 0, "out_min": 1100,
+                              "out_mid": 1550, "out_max": 1900}
+    t = gp.Mixer(trimmed)
+    t.reset()
+    for axis, want in ((-1.0, 1100), (0.0, 1550), (1.0, 1900)):
+        st = gp.InputState(axes=(axis, 0.0, 0.0, 0.0), buttons=(False,) * 8,
+                           hats=((0, 0),), timestamp=time.monotonic(),
+                           device_name="fake", connected=True)
+        got = crsf.crsf_to_us(t.compute({0: st})[0])
+        print(f"   mid 1550, stick {axis:+.0f}: {got:4.0f} us")
+        assert abs(got - want) < 2, f"expected {want}, got {got}"
+
+    # A midpoint outside the ends would run half the throw backwards, so it
+    # is held between them.
+    silly = configmod.default_config()
+    silly["channels"][0] = {"src": "axis", "idx": 0, "out_min": 1100,
+                            "out_mid": 1990, "out_max": 1900}
+    assert gp.Mixer(silly).channels[0].mid_units == crsf.us_to_crsf(1900), (
+        "a midpoint past the top end must be held at it")
+    print("   a midpoint outside the ends is held between them")
+
     frame(1.0)
     for _ in range(200):
         held = m.compute({0: gp.InputState(connected=False,

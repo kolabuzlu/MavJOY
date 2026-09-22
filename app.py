@@ -415,24 +415,26 @@ class App(tk.Tk):
                                                 pady=(10, 2))
         ttk.Label(tab, wraplength=900, justify="left",
                   foreground=self.pal["muted"],
-                  text="Centre stays at 1500 and each half is scaled on its "
-                       "own, the way a handset's output limits work. Pulling "
-                       "max down to 1900 shortens the throw one way without "
-                       "moving neutral — scaling the whole range instead "
-                       "would drag neutral with it and leave the model "
-                       "permanently out of trim.").pack(anchor="w", padx=10,
-                                                        pady=(0, 8))
+                  text="A centred stick lands on mid, and each half is "
+                       "scaled onto its own end independently — the way a "
+                       "handset's output limits and subtrim work together. "
+                       "Pulling max down to 1900 shortens the throw one way "
+                       "without moving neutral; moving mid shifts neutral "
+                       "without touching either end. Mid is held inside the "
+                       "two ends, since a centre outside them would run half "
+                       "the throw backwards.").pack(anchor="w", padx=10,
+                                                    pady=(0, 8))
 
         grid = ttk.Frame(tab)
         grid.pack(fill="both", expand=True, padx=10)
         for col, (title, weight) in enumerate(
-                (("", 0), ("", 0), ("min µs", 0), ("max µs", 0),
-                 ("sent", 0), ("", 1))):
+                (("", 0), ("", 0), ("min µs", 0), ("mid µs", 0),
+                 ("max µs", 0), ("sent", 0), ("", 1))):
             grid.columnconfigure(col, weight=weight)
             ttk.Label(grid, text=title, foreground=self.pal["muted"]).grid(
                 row=0, column=col, sticky="w", padx=(0, 10), pady=(0, 2))
         ttk.Separator(grid, orient="horizontal").grid(
-            row=1, column=0, columnspan=6, sticky="ew", pady=(0, 6))
+            row=1, column=0, columnspan=7, sticky="ew", pady=(0, 6))
 
         self.out_widgets = []
         for i in range(crsf.NUM_CHANNELS):
@@ -452,21 +454,29 @@ class App(tk.Tk):
             lo_spin.grid(row=row, column=2, sticky="w", padx=(0, 10))
             self._commit_on(lo_spin, lambda _e, n=i: self.on_output_changed(n))
 
+            mid = tk.StringVar(value=str(ch.out_mid))
+            mid_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
+                                   increment=10, width=6, textvariable=mid,
+                                   command=lambda n=i: self.on_output_changed(n))
+            mid_spin.grid(row=row, column=3, sticky="w", padx=(0, 10))
+            self._commit_on(mid_spin, lambda _e, n=i: self.on_output_changed(n))
+
             hi = tk.StringVar(value=str(ch.out_max))
             hi_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
                                   increment=10, width=6, textvariable=hi,
                                   command=lambda n=i: self.on_output_changed(n))
-            hi_spin.grid(row=row, column=3, sticky="w", padx=(0, 10))
+            hi_spin.grid(row=row, column=4, sticky="w", padx=(0, 10))
             self._commit_on(hi_spin, lambda _e, n=i: self.on_output_changed(n))
 
             sent = ttk.Label(grid, text="—", width=12, anchor="e")
-            sent.grid(row=row, column=4, sticky="e", padx=(0, 10))
+            sent.grid(row=row, column=5, sticky="e", padx=(0, 10))
 
             bar = ttk.Progressbar(grid, maximum=1000)
-            bar.grid(row=row, column=5, sticky="ew", pady=2)
+            bar.grid(row=row, column=6, sticky="ew", pady=2)
 
-            self.out_widgets.append({"lo": lo, "hi": hi, "sent": sent,
-                                     "bar": bar, "lo_spin": lo_spin,
+            self.out_widgets.append({"lo": lo, "mid": mid, "hi": hi,
+                                     "sent": sent, "bar": bar,
+                                     "lo_spin": lo_spin, "mid_spin": mid_spin,
                                      "hi_spin": hi_spin})
 
         foot = ttk.Frame(tab)
@@ -485,20 +495,23 @@ class App(tk.Tk):
         old = self.mixer.channels[i]
         try:
             lo = int(float(w["lo"].get()))
+            mid = int(float(w["mid"].get()))
             hi = int(float(w["hi"].get()))
         except (TypeError, ValueError):
             return                      # mid-typing; the box is not a number
         lo = max(self.OUT_MIN_US, min(self.OUT_MAX_US, lo))
+        mid = max(self.OUT_MIN_US, min(self.OUT_MAX_US, mid))
         hi = max(self.OUT_MIN_US, min(self.OUT_MAX_US, hi))
-        if lo == old.out_min and hi == old.out_max:
+        if lo == old.out_min and mid == old.out_mid and hi == old.out_max:
             return
         self.mixer.channels[i] = dataclasses.replace(old, out_min=lo,
-                                                     out_max=hi)
+                                                     out_mid=mid, out_max=hi)
         self.cfg["channels"][i] = self.mixer.channels[i].to_dict()
 
     def reset_outputs(self):
         for i in range(crsf.NUM_CHANNELS):
             self.out_widgets[i]["lo"].set(str(self.OUT_MIN_US))
+            self.out_widgets[i]["mid"].set(str(crsf.US_MID))
             self.out_widgets[i]["hi"].set(str(self.OUT_MAX_US))
             self.on_output_changed(i)
         self.log("info", "Every channel back to full travel.")
@@ -2209,6 +2222,7 @@ class App(tk.Tk):
             w["inv"].set(ch.inv)
             w["dev"].set(str(ch.dev))
             self.out_widgets[i]["lo"].set(str(ch.out_min))
+            self.out_widgets[i]["mid"].set(str(ch.out_mid))
             self.out_widgets[i]["hi"].set(str(ch.out_max))
             self._sync_row_widgets(i)
         t = self.cfg["throttle"]
