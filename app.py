@@ -86,6 +86,7 @@ class App(tk.Tk):
             self.cfg.get("firmware", crsf.DEFAULT_FIRMWARE))
         self._armed_report = None           # True, False, or None for unknown
         self._missing_port = None           # port named by config, not here
+        self._fc_talking = False            # anything arriving from the FC
         self._mode_since = 0.0              # first flight-mode frame
         self._said_star_hint = False
         self._pending_write = None          # (field index, value) we asked for
@@ -1956,6 +1957,7 @@ class App(tk.Tk):
                 self.rf_lbl.config(text="no telemetry")
                 self._set_lq(None)
             self._last_mode = telem.get("mode")
+            self._fc_talking = self._fc_is_talking(telem)
             self._set_mode(self._last_mode)
             held = self.mixer.holding()
             if held:
@@ -1975,6 +1977,7 @@ class App(tk.Tk):
             self.rf_lbl.config(text="no telemetry")
             self._set_lq(None)
             self._last_mode = None
+            self._fc_talking = False
             self._set_mode(None)
             src = "simulated pad" if self.simulate else (
                 state.device_name if state.connected else "no gamepad")
@@ -2051,7 +2054,25 @@ class App(tk.Tk):
     # A flight mode is acted on, so a stale one is worse than none: the
     # model can change mode by itself - a failsafe is exactly that - and a
     # name left over from before the telemetry stopped would read as current.
-    MODE_STALE = 3.0
+    # Frames that come FROM the flight controller. Link statistics are
+    # deliberately not among them: those are the module's own account of the
+    # RF link and keep arriving whether or not anything is listening at the
+    # far end, so they say nothing about whether the aircraft is still
+    # talking.
+    FC_FRAMES = ("mode", "attitude", "battery", "gps", "baro", "vario")
+
+    # How long the flight controller has to say nothing at all before what
+    # it last said is treated as out of date.
+    #
+    # This used to be the age of the flight-mode frame itself, at three
+    # seconds, which was wrong: a flight mode is sent every so often rather
+    # than continuously, and over a link with a low telemetry ratio the gap
+    # between frames is easily longer than that. The banner then blinked
+    # between the mode and a dash at the rate the frames happened to arrive,
+    # which reads as a fault when nothing is wrong. A mode does not go stale
+    # because it was not repeated; it goes stale when the aircraft stops
+    # speaking.
+    FC_QUIET = 10.0
     MODE_MAX_CHARS = 10
 
     FIRMWARE_LABELS = {"ardupilot": "ArduPilot", "inav": "INAV"}
@@ -2082,6 +2103,15 @@ class App(tk.Tk):
     # of that mark means anything.
     STAR_HINT_AFTER = 10.0
 
+    def _fc_is_talking(self, telem):
+        """True while anything is still arriving from the flight controller."""
+        now = time.monotonic()
+        for key in self.FC_FRAMES:
+            data = telem.get(key)
+            if isinstance(data, dict) and now - data.get("_t", 0) < self.FC_QUIET:
+                return True
+        return False
+
     def _model_armed(self):
         """True only when the model itself says it is armed.
 
@@ -2106,7 +2136,7 @@ class App(tk.Tk):
         that reads DISARMED because it cannot tell would be worse than no
         arm light at all.
         """
-        fresh = data and time.monotonic() - data.get("_t", 0) < self.MODE_STALE
+        fresh = bool(data) and self._fc_talking
         if fresh and not self._mode_since:
             self._mode_since = time.monotonic()
         self._armed_report = self._arm_watch.feed(data if fresh else None)
@@ -2139,7 +2169,7 @@ class App(tk.Tk):
     def _set_mode(self, data):
         """Paint the flight-mode chip with what the model reports."""
         name = (data or {}).get("mode")
-        fresh = data and time.monotonic() - data.get("_t", 0) < self.MODE_STALE
+        fresh = bool(data) and self._fc_talking
         if not name or not fresh:
             self.mode_lbl.config(text="MODE: —", bg=self.pal["idle"])
             return
