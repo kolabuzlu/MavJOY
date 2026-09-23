@@ -484,6 +484,39 @@ def _check_endpoints():
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
 
 
+def _check_rate_warning():
+    """The rate warning gives advice that is true for the baud in use.
+
+    It used to tell everyone to raise the baud to 921600 - including people
+    already at 921600, where the baud is not the limit at all: MavJOY's own
+    ceiling is, and only a slower packet rate buys the margin back.
+    """
+    import app as appmod
+
+    print("")
+    print("-- rate warning --")
+    for baud in (115200, 400000, 921600):
+        for req in (100, 150, 250, 333, 500, 1000):
+            want = crsf.recommended_crsf_rate(req, baud)
+            if want >= req * 2:
+                continue
+            msg = appmod.App._rate_headroom_warning(req, want, baud)
+            baud_limited = crsf.recommended_crsf_rate(0, baud) < \
+                crsf.recommended_crsf_rate(0, 10 ** 9)
+            says_raise = "Raise the baud" in msg
+            assert says_raise == baud_limited, (
+                f"at {baud} baud asking {req} Hz the message "
+                f"{'says' if says_raise else 'does not say'} to raise the "
+                f"baud, but the baud {'is' if baud_limited else 'is not'} "
+                f"the limit: {msg}")
+    print("   raise the baud: said at 115200, never at 400000 or 921600")
+
+    # The case the pilot actually flies must stay silent: 100Hz Full at
+    # 921600 is three times oversampled and there is nothing to warn about.
+    assert crsf.recommended_crsf_rate(100, 921600) == 300
+    print("   100 Hz asked at 921600: sends 300, no warning")
+
+
 def _check_config_writes():
     """Only Save and Import may write the live configuration to disk.
 
@@ -1439,6 +1472,7 @@ def _run(wire):
     _check_latch_memory()
     _check_throttle_cut()
     _check_guarded_reset()
+    _check_rate_warning()
     _check_config_writes()
     _check_map()
     _check_module_prep()

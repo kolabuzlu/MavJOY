@@ -1699,9 +1699,42 @@ class App(tk.Tk):
         # Oversampling is the whole point; say so if the link cannot manage it.
         if want < requested * 2 and self._rate_warned != (requested, want):
             self._rate_warned = (requested, want)
-            self.log("warn", f"{self.link.baud} baud only allows {want} Hz, which "
-                             f"is under twice the {requested:.0f} Hz the module "
-                             f"wants. Raise the baud to 921600 for more headroom.")
+            self.log("warn", self._rate_headroom_warning(requested, want,
+                                                         self.link.baud))
+
+    @staticmethod
+    def _rate_headroom_warning(requested, want, baud):
+        """Why MavJOY cannot send twice what the module asks - truthfully.
+
+        Two different things hold the rate down, and they need opposite
+        advice. At 115200 it is the serial link, and a faster baud is the
+        fix. At 400000 and 921600 the link could carry far more, and what
+        stops it is MavJOY's own ceiling. This used to say "raise the baud
+        to 921600" in both cases - wrong advice, given to someone already
+        at 921600, in exactly the case where they would read it. There the
+        only thing that buys the margin back is a slower packet rate.
+
+        Both limits are asked of crsf.recommended_crsf_rate rather than
+        written down again here, so the message cannot drift from the rate
+        it is explaining.
+        """
+        ceiling = crsf.recommended_crsf_rate(0, 10 ** 9)   # no baud limit at all
+        if crsf.recommended_crsf_rate(0, baud) < ceiling:
+            return (f"{baud} baud allows only {want} Hz of CRSF, under twice the "
+                    f"{requested:.0f} Hz the module wants. Raise the baud to "
+                    f"921600 for more headroom.")
+        # At or below 1:1 the two clocks drift through each other and some RF
+        # slots find no new frame - ExpressLRS's own JustSentRFpacket() counts
+        # those as missed. Between 1x and 2x that is merely closer to happening.
+        if want <= requested:
+            effect = ("so some RF packets will go out carrying the previous "
+                      "stick positions")
+        else:
+            effect = "which leaves little margin between the PC's clock and the module's"
+        return (f"MavJOY sends at most {ceiling} Hz of CRSF, under twice the "
+                f"{requested:.0f} Hz the module wants, {effect}. The baud is not "
+                f"the limit here. A packet rate of {ceiling // 2} Hz or lower "
+                f"keeps the full margin.")
 
     # ---------------------------------------------------- module settings
     # Commands that take the module off the air. Bind re-pairs it; WiFi and
