@@ -32,6 +32,12 @@ import sys
 
 import crsf
 
+# The one place the version is written down. It was in three - the window
+# title, SAFETY.txt and the user-agent the map sends to openstreetmap.org -
+# and the third had already drifted a release behind the other two.
+VERSION = "1.2.0"
+
+
 def base_dir():
     """Where the app keeps the files it writes.
 

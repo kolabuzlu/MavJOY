@@ -34,7 +34,7 @@ REFRESH_MS = 50          # GUI refresh, 20 Hz
 BAR_LEN = 150
 
 
-VERSION = "1.1.1"
+VERSION = configmod.VERSION
 
 
 def fmt_channel(value: int) -> str:

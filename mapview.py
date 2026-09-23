@@ -25,13 +25,15 @@ import tkinter as tk
 from collections import deque
 from tkinter import ttk
 
+import config
+
 TILE_SIZE = 256
 TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 # openstreetmap.org asks that applications identify themselves and not
 # bulk-download. This fetches only the handful of tiles under the current
 # view, once each, and keeps them on disk afterwards.
-USER_AGENT = "MavJOY/1.1 (+https://github.com/kolabuzlu/MavJOY)"
+USER_AGENT = f"MavJOY/{config.VERSION} (+https://github.com/kolabuzlu/MavJOY)"
 
 MIN_ZOOM, MAX_ZOOM = 9, 17
 
