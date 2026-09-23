@@ -93,6 +93,7 @@ class App(tk.Tk):
         self._held_from_drop = None         # values a dropped link left behind
         self._telem_gap = {}                # key -> [last _t, last gap, worst]
         self._last_gps_t = None             # so the map redraws on new fixes only
+        self._last_baro_t = None            # and takes each baro altitude once
         self._mode_since = 0.0              # first flight-mode frame
         self._said_star_hint = False
         self._pending_write = None          # (field index, value) we asked for
@@ -2515,6 +2516,12 @@ class App(tk.Tk):
         if gps and gps.get("_t") != self._last_gps_t:
             self._last_gps_t = gps.get("_t")
             self.map.update_position(gps)
+        # The baro frame carries height above home on both firmwares, which
+        # the GPS frame does not - see MapView.altitude().
+        baro = telem.get("baro")
+        if baro and baro.get("_t") != self._last_baro_t:
+            self._last_baro_t = baro.get("_t")
+            self.map.update_baro(baro)
         self.map.poll()
         for key in ("mode", "link", "battery", "attitude", "baro", "vario",
                     "gps", "unknown"):

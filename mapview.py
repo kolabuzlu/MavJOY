@@ -21,6 +21,7 @@ import math
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from collections import deque
 from tkinter import ttk
@@ -36,6 +37,20 @@ TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 USER_AGENT = f"MavJOY/{config.VERSION} (+https://github.com/kolabuzlu/MavJOY)"
 
 MIN_ZOOM, MAX_ZOOM = 9, 17
+
+# The marker sets itself from the first fix with at least this many
+# satellites. A receiver reports positions long before it has a solid fix,
+# and the first ones can be tens of metres out - and the marker is what
+# every bearing and, when there is no baro frame, every altitude is
+# measured from. HITL never shows this: a simulator hands over a perfect
+# fix at once. Six is where both INAV and ArduPilot start trusting GPS.
+MIN_SATS_FOR_MARKER = 6
+
+# How long a baro altitude stays good enough to show. It has to outlast
+# the slowest schedule either firmware uses - ArduPilot drops the baro
+# frame to one every 3 s when telemetry bandwidth is short - or the
+# readout would flick between sources on every gap.
+BARO_FRESH_S = 10.0
 
 # About nine tiles cover the canvas. The rest is slack for panning and for
 # the zoom changing as the aircraft moves out and back, which is what
@@ -271,13 +286,18 @@ class MapView(ttk.Frame):
         # widget, and overwriting it breaks every child made after.
         self._cw, self._ch = width, height
 
-        self.origin = None             # (lat, lon)
+        self.origin = None           # (lat, lon) of the marker
+        self.origin_alt = None       # GPS altitude at the marker
         self.pos = None              # (lat, lon)
         self.heading = 0.0
         self.sats = 0
-        self.alt = 0.0
+        self.gps_alt = None          # as the GPS frame gave it - see altitude()
         self.speed = 0.0
         self.trail = deque(maxlen=TRAIL_MAX)
+        self._baro_alt = None
+        self._baro_t = None
+        self._dist = 0.0
+        self._bearing = 0.0
         self._zoom = 15
         self._ink = palette["text"]
         self._ink_soft = palette["muted"]
@@ -319,9 +339,11 @@ class MapView(ttk.Frame):
         like it moved the RTL point would be worth pressing in an
         emergency, and would do nothing.
         """
+        # Honoured whatever the satellite count: pressing it is the pilot
+        # saying this is the point to measure from, which the automatic
+        # marker has no business second-guessing.
         if self.pos:
-            self.origin = self.pos
-            self.trail.clear()
+            self._set_marker()
             self.draw()
 
     def _tiles_toggled(self):
@@ -342,13 +364,63 @@ class MapView(ttk.Frame):
         self.pos = (lat, lon)
         self.heading = gps.get("heading", 0.0) or 0.0
         self.sats = gps.get("sats", 0) or 0
-        self.alt = gps.get("altitude_m", 0) or 0
+        self.gps_alt = gps.get("altitude_m")
         self.speed = gps.get("speed_kmh", 0.0) or 0.0
-        if self.origin is None:
-            self.origin = self.pos
-        if not self.trail or self.trail[-1] != self.pos:
+
+        # The aircraft is drawn from its first position, so there is
+        # something to see while the receiver settles. The marker is not:
+        # it waits for a fix good enough to measure everything else from,
+        # and the track starts with it so the warm-up wander is not drawn
+        # as though the aircraft had flown it.
+        if self.origin is None and self.sats >= MIN_SATS_FOR_MARKER:
+            self._set_marker()
+        if self.origin is not None and (not self.trail or self.trail[-1] != self.pos):
             self.trail.append(self.pos)
         self.draw()
+
+    def update_baro(self, baro):
+        """Feed one baro-altitude frame. Only the readout changes, so the
+        canvas is left alone - these arrive up to five times a second."""
+        if not baro or baro.get("altitude_m") is None:
+            return
+        self._baro_alt = baro["altitude_m"]
+        self._baro_t = baro.get("_t", time.monotonic())
+        self._update_status()
+
+    def altitude(self):
+        """Height above home, the same way for either firmware.
+
+        The two firmwares disagree about what the GPS frame's altitude
+        means. INAV sends height above the point it armed at; ArduPilot
+        sends raw GPS altitude above sea level. At a field 890 m up the
+        same flight reads 75 m from one and 965 m from the other.
+
+        Their baro frames agree, though. ArduPilot's carries
+        get_nav_alt_m(ABOVE_HOME), its EKF height above home; INAV's is
+        the same value it puts in its GPS frame. So that is used whenever
+        one is arriving - and on ArduPilot it is also the fused figure,
+        where raw GPS altitude is the noisiest thing a receiver reports.
+
+        INAV sends a baro frame only if the aircraft has a barometer. For
+        that case the GPS altitude is taken relative to the marker's.
+        Subtracting cancels whichever zero the firmware used, so that is
+        right for both as well: 965 - 890 and 75 - 0 are both 75.
+
+        Deliberately not keyed off the firmware dropdown. That setting
+        only decides how arming is read, and a map that depended on it
+        would show a wrong altitude whenever someone forgot to change it.
+        """
+        if (self._baro_alt is not None and self._baro_t is not None
+                and time.monotonic() - self._baro_t < BARO_FRESH_S):
+            return self._baro_alt
+        if self.gps_alt is not None and self.origin_alt is not None:
+            return self.gps_alt - self.origin_alt
+        return None
+
+    def _set_marker(self):
+        self.origin = self.pos
+        self.origin_alt = self.gps_alt
+        self.trail.clear()
 
     def poll(self):
         """Called on the GUI tick; redraws if tiles have landed."""
@@ -430,13 +502,24 @@ class MapView(ttk.Frame):
         self._draw_markers(c, to_canvas)
         self._draw_scale(c, centre_lat)
 
-        if self.origin and self.pos:
+        self._dist, self._bearing = dist, bearing
+        self._update_status()
+
+    def _update_status(self):
+        if self.pos is None and self.origin is None:
+            self.status.set("no GPS")
+            return
+        alt = self.altitude()
+        alt_txt = f"alt {alt:.0f} m" if alt is not None else "alt —"
+        if self.origin is None:
             self.status.set(
-                f"{self._fmt_m(dist)}   to plane {bearing:03.0f}°   "
-                f"hdg {self.heading:03.0f}°   alt {self.alt:.0f} m   "
-                f"{self.speed:.0f} km/h   {self.sats} sats")
-        else:
-            self.status.set(f"{self.sats} sats")
+                f"{self.sats} sats   marker waits for {MIN_SATS_FOR_MARKER}   "
+                f"{alt_txt}   {self.speed:.0f} km/h")
+            return
+        self.status.set(
+            f"{self._fmt_m(self._dist)}   to plane {self._bearing:03.0f}°   "
+            f"hdg {self.heading:03.0f}°   {alt_txt}   "
+            f"{self.speed:.0f} km/h   {self.sats} sats")
 
     @staticmethod
     def _fmt_m(m):

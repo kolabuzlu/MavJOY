@@ -659,6 +659,65 @@ def _check_map():
         print(f"   across the antimeridian: {d/1000:.1f} km apart, "
               f"aircraft drawn at x={xs[0]:.0f} on a {w}px canvas")
 
+        # The marker waits for a real fix. A receiver reports positions
+        # long before it has one, and those can be tens of metres out -
+        # and the marker is what every bearing is measured from. HITL
+        # never exercises this: a simulator hands over a perfect fix.
+        w = mv.MapView(root, theme.DARK,
+                       os.path.join(tempfile.gettempdir(), "mavjoy_map_test"))
+        w.tiles.enabled = False
+        strip = (39.9334, 32.8597)
+        for sats in (3, 4, 5):
+            w.update_position({"lat": strip[0] + 0.0006, "lon": strip[1],
+                               "altitude_m": 915, "sats": sats})
+        assert w.origin is None, "the marker must not set from a 3-5 satellite fix"
+        assert w.pos is not None, "the aircraft should still be drawn meanwhile"
+        assert not w.trail, "the warm-up wander must not be drawn as a track"
+        w.update_position({"lat": strip[0], "lon": strip[1],
+                           "altitude_m": 890, "sats": mv.MIN_SATS_FOR_MARKER})
+        assert w.origin == strip, f"the marker should set on the strip, got {w.origin}"
+        assert w.origin_alt == 890, "the marker should take the settled altitude"
+        print(f"   marker ignored 3-5 satellites 67 m out, set at "
+              f"{mv.MIN_SATS_FOR_MARKER} on the strip")
+
+        # Height above home, the same whichever firmware is flying. The
+        # GPS frame cannot give that directly: ArduPilot puts sea-level
+        # altitude in it and INAV height above arming. Their baro frames
+        # agree, so that wins when it is arriving; failing that, GPS
+        # altitude is taken from the marker's, which cancels either zero.
+        w.update_position({"lat": strip[0] + 0.002, "lon": strip[1],
+                           "altitude_m": 965, "sats": 14})
+        got = w.altitude()
+        assert got == 75, f"ArduPilot, no baro: 965 - 890 should be 75, got {got}"
+        w.update_baro({"altitude_m": 74.6, "_t": time.monotonic()})
+        assert w.altitude() == 74.6, "a fresh baro altitude should be used"
+        w._baro_t = time.monotonic() - (mv.BARO_FRESH_S + 1)
+        assert w.altitude() == 75, "a stale baro altitude should give way to GPS"
+        print("   altitude: baro when fresh, GPS above the marker when not")
+
+        i = mv.MapView(root, theme.DARK,
+                       os.path.join(tempfile.gettempdir(), "mavjoy_map_test"))
+        i.tiles.enabled = False
+        i.update_position({"lat": strip[0], "lon": strip[1], "altitude_m": 0,
+                           "sats": 9})
+        i.update_position({"lat": strip[0] + 0.002, "lon": strip[1],
+                           "altitude_m": 75, "sats": 14})
+        assert i.altitude() == 75, f"INAV, no baro: 75 - 0 should be 75, got {i.altitude()}"
+        print("   965 m above the sea and 75 m above arming both read 75 m")
+
+        # Pressing Reset marker is the pilot saying where to measure from;
+        # the satellite count has no business overruling that.
+        r = mv.MapView(root, theme.DARK,
+                       os.path.join(tempfile.gettempdir(), "mavjoy_map_test"))
+        r.tiles.enabled = False
+        r.update_position({"lat": strip[0], "lon": strip[1], "altitude_m": 900,
+                           "sats": 3})
+        assert r.origin is None
+        r.reset_marker()
+        assert r.origin == strip and r.origin_alt == 900, \
+            "Reset marker must be honoured whatever the satellite count"
+        print("   Reset marker is honoured with 3 satellites")
+
         # An unbounded tile cache is a leak in a program left open for a
         # day of flying: every new zoom and position adds images nothing
         # ever removes.
