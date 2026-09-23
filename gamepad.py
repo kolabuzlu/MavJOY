@@ -581,11 +581,23 @@ class ThrottleEngine:
         cfg = self.cfg
         mode = cfg.get("mode", "trigger")
 
+        # Cut wins over every mode, which is what a throttle cut is for.
+        # The return used to be ramp-only, and it reads as though it were
+        # about the ramp: the integration below must not run while the
+        # throttle is being held down or it would climb straight back up.
+        # But trigger and axis modes recompute unconditionally further
+        # down, so in those two the zero above was overwritten on the very
+        # next line and the button did nothing at all - while the Throttle
+        # tab went on promising it dropped to idle.
+        #
+        # Holding it now forces idle in all three. Releasing it in trigger
+        # or axis mode hands the throttle straight back to where the
+        # physical control is sitting, because those modes ARE the control
+        # position; that is how the cut switch on a transmitter behaves.
         cut_btn = cfg.get("cut_button", -1)
         if 0 <= cut_btn < len(st.buttons) and st.buttons[cut_btn]:
             self.value = 0.0
-            if mode == "ramp":
-                return 0.0
+            return 0.0
 
         if mode == "trigger":
             self.value = self._trigger_value(st, cfg.get("axis", 5))
@@ -922,7 +934,7 @@ class Mixer:
                 continue
             vals.append(self._channel_value(ch, st or _BLANK_STATE, thr,
                                             edges.get(ch.dev, _NO_EDGES)))
-        self._apply_resets(vals)
+        self._apply_resets(vals, live)
         self._apply_hold(vals)
         self.last_values = vals
         self.output_values = self._apply_endpoints(vals)
@@ -975,8 +987,14 @@ class Mixer:
         self._hold_ref = {}
 
     def holding(self):
-        """Channel numbers still frozen since the last resume."""
-        return sorted(i + 1 for i in self._held)
+        """Channel numbers still frozen since the last resume.
+
+        The one mixer call the GUI thread makes while the link thread owns
+        everything else here, so it takes a copy first: _apply_hold deletes
+        from _held as channels are released, and a delete landing between
+        two steps of a generator walking the same dict raises.
+        """
+        return sorted(i + 1 for i in list(self._held))
 
     def _apply_hold(self, vals):
         if not self._held:
@@ -995,7 +1013,20 @@ class Mixer:
                 continue
             vals[i] = self._held[i]
 
-    def _apply_resets(self, vals):
+    @staticmethod
+    def _guard_open(ch, st):
+        """Whether a guarded channel is allowed to change right now.
+
+        An unguarded channel is always open. A guarded one needs its button
+        held on its own device, so a device that has gone away holds the
+        channel shut rather than opening it.
+        """
+        if ch.guard < 0:
+            return True
+        return (st is not None and ch.guard < len(st.buttons)
+                and st.buttons[ch.guard])
+
+    def _apply_resets(self, vals, live):
         """Drop a latch back to low when another channel moves.
 
         Watches the channel named by reset_ch and fires once it has moved
@@ -1010,6 +1041,20 @@ class Mixer:
                 continue
             watched = ch.reset_ch - 1
             if not (0 <= watched < len(vals)) or watched == i:
+                continue
+
+            # A guard covers this way in too. It used to cover only the
+            # button, so a channel carrying both a guard and a reset could
+            # still be thrown by the watched control alone - which is the
+            # accident the guard exists to stop, arriving by the one route
+            # that was not watched.
+            #
+            # The baseline keeps moving while the guard is off, so that
+            # pressing the guard does not immediately fire on travel that
+            # happened before it was held. Only movement made with the
+            # guard down counts.
+            if not self._guard_open(ch, live.get(ch.dev)):
+                self._reset_ref[i] = vals[watched]
                 continue
 
             moved = self._move_units(ch.reset_move)
@@ -1170,8 +1215,7 @@ class Mixer:
         # point of it in the air, and on the ground stopping the link is
         # always there if the guard itself fails.
         if ch.guard >= 0 and src in GUARDED_SOURCES:
-            held = (ch.guard < len(st.buttons)) and st.buttons[ch.guard]
-            if not held:
+            if not self._guard_open(ch, st):
                 st = _BLANK_STATE
                 pressed = _NO_EDGES
 

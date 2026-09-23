@@ -198,7 +198,14 @@ def read_file(path):
     if not isinstance(data.get("channels"), list):
         raise ValueError("has no channel mapping, so it is not a MavJOY "
                          "configuration")
-    cfg = _normalise(data)
+    # The two checks above catch the shapes worth naming; this catches the
+    # rest, so that a file which is valid JSON but malformed inside comes
+    # back as the import dialog's error rather than as a traceback with no
+    # console to print to.
+    try:
+        cfg = _normalise(data)
+    except Exception as exc:
+        raise ValueError(f"could not be understood ({exc})") from exc
     for key in NOT_PORTABLE:
         cfg[key] = copy.deepcopy(DEFAULT_CONFIG[key])
     return cfg
@@ -207,13 +214,21 @@ def read_file(path):
 def load(path: str = CONFIG_PATH):
     if not os.path.exists(path):
         return default_config(), None
+    # _normalise has to sit inside the guard, not after it. A file can be
+    # perfectly good JSON and still be the wrong shape - a scalar where a
+    # list belongs, a null in the channel array - and the shaping below
+    # unpacks those without checking. This runs from App.__init__, before
+    # there is any window to show an error in, so anything escaping here
+    # means the program does not start at all rather than starting on the
+    # defaults it already knows how to fall back to.
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
+        cfg = _normalise(data)
     except Exception as exc:
         return default_config(), f"config.json could not be read ({exc}); using defaults"
 
-    return _normalise(data), None
+    return cfg, None
 
 
 def save(cfg, path: str = CONFIG_PATH):

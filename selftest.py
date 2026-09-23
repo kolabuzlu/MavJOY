@@ -481,6 +481,168 @@ def _check_endpoints():
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
 
 
+def _check_throttle_cut():
+    """The cut button drops the throttle to idle in every throttle mode.
+
+    It only ever worked in ramp mode. The zero was written before the mode
+    was looked at, but only ramp returned on it, so trigger and axis - both
+    of which recompute from the live control - overwrote it on the next
+    line and the button did nothing, with the Throttle tab still calling it
+    an instant drop to idle. Ramp is the shipped default, which is why this
+    went unnoticed: the mode most people fly was the one that worked.
+    """
+    print("")
+    print("-- throttle cut --")
+    # "Fully open" is a different stick position in each mode, so this is
+    # not one tuple for all three. All of them read axis 5, the right
+    # trigger; ramp also reads axis 2 as the down demand, which has to be
+    # left at rest or it cancels the up; and axis mode is reversed by
+    # default, so there full open is the other end of the same travel.
+    OPEN = {"trigger": {5: 1.0, 2: -1.0},
+            "ramp":    {5: 1.0, 2: -1.0},
+            "axis":    {5: -1.0, 2: -1.0}}
+
+    def state(mode, cut):
+        axes = [0.0] * 8
+        for idx, value in OPEN[mode].items():
+            axes[idx] = value
+        buttons = [False] * 16
+        buttons[6] = cut                      # button 6 = Back = the cut
+        return gp.InputState(axes=tuple(axes), buttons=tuple(buttons),
+                             hats=((0, 0),), timestamp=time.monotonic(),
+                             connected=True)
+
+    for mode in gp.THROTTLE_MODES:
+        cfg = configmod.default_config()["throttle"]
+        cfg["mode"] = mode
+        eng = gp.ThrottleEngine(cfg)
+
+        # Wind it up first, so the cut has something to cut.
+        for _ in range(60):
+            eng.update(state(mode, cut=False), 0.05)
+        opened = eng.value
+        cut = eng.update(state(mode, cut=True), 0.05)
+        print(f"   {mode:8s} open {opened * 100:5.1f} %   cut {cut * 100:5.1f} %")
+        assert opened > 0.5, f"{mode}: the throttle should be open before the cut"
+        assert cut == 0.0, f"{mode}: the cut button must drop the throttle to idle"
+
+        # Still idle while it is held, and only then handed back.
+        assert eng.update(state(mode, cut=True), 0.05) == 0.0, \
+            f"{mode}: the throttle must stay down while the cut is held"
+        assert eng.update(state(mode, cut=False), 0.05) > 0.0, \
+            f"{mode}: releasing the cut must give the throttle back"
+    print("   held down it stays at idle, released it comes back")
+
+
+def _check_guarded_reset():
+    """A reset channel cannot throw a guarded latch either.
+
+    The guard was checked where the button is read and nowhere else, so a
+    channel carrying both a guard and a reset could still be flipped by the
+    watched control on its own - the exact accident the guard is there to
+    prevent, arriving by the one route that was not watched.
+    """
+    print("")
+    print("-- guarded reset channel --")
+    cfg = configmod.default_config()
+    cfg["channels"][0] = {"src": "axis", "idx": 0, "inv": False}      # watched
+    cfg["channels"][1] = {"src": "oneway", "idx": 3, "inv": False,    # guarded
+                          "guard": 5, "reset_ch": 1, "reset_move": 100}
+    cfg["channels"][2] = {"src": "oneway", "idx": 4, "inv": False,    # not guarded
+                          "reset_ch": 1, "reset_move": 100}
+    m = gp.Mixer(cfg)
+    m.reset()
+
+    def frame(axis=0.0, *down):
+        b = [False] * 16
+        for i in down:
+            b[i] = True
+        st = gp.InputState(axes=(axis, 0.0, 0.0, 0.0, 0.0), buttons=tuple(b),
+                           hats=((0, 0),), timestamp=time.monotonic(),
+                           connected=True)
+        v = m.compute({0: st})
+        return v[1], v[2]
+
+    # Latch both high. The guarded one needs its guard held to accept the
+    # press; the plain one does not.
+    frame(0.0, 5, 3, 4)
+    guarded, plain = frame(0.0)
+    assert guarded == crsf.CHANNEL_MAX and plain == crsf.CHANNEL_MAX, \
+        "both channels should be latched high to start"
+    print(f"   latched:                    CH2 = {guarded}   CH3 = {plain}")
+
+    # Sweep the watched channel with no guard held. The unguarded latch is
+    # meant to fall - that is the way back the source is built around - and
+    # the guarded one is meant to sit exactly where it is.
+    for axis in (1.0, -1.0, 1.0):
+        guarded, plain = frame(axis)
+    print(f"   swept, guard released:      CH2 = {guarded}   CH3 = {plain}")
+    assert plain == crsf.CHANNEL_MIN, "an unguarded reset must still work"
+    assert guarded == crsf.CHANNEL_MAX, \
+        "a reset must not throw a guarded latch with the guard released"
+
+    # Press the guard with the watched control left exactly where the sweep
+    # above put it. Nothing has moved since, so nothing may fire: the travel
+    # that happened while the guard was off must not be banked up and spent
+    # the moment it goes down.
+    guarded, _ = frame(1.0, 5)
+    print(f"   guard pressed, no new move: CH2 = {guarded}")
+    assert guarded == crsf.CHANNEL_MAX, \
+        "holding the guard must not reset on movement made before it was held"
+
+    # Moving it with the guard held is the way back.
+    guarded, _ = frame(-1.0, 5)
+    print(f"   swept with guard held:      CH2 = {guarded}")
+    assert guarded == crsf.CHANNEL_MIN, \
+        "with the guard held, the reset channel must work"
+
+
+def _check_hold_snapshot():
+    """holding() survives the link thread releasing channels under it.
+
+    holding() is the one thing the GUI thread reads out of the mixer while
+    the link thread owns it, and _apply_hold deletes from the same dict as
+    each channel is taken back. Walking it without a copy raised
+    "dictionary changed size during iteration" - caught by the guard around
+    the display tick, so the cost was a dropped frame and an error in the
+    status line, at the moment after a failsafe when the pilot is reading
+    that line to see what is still held.
+    """
+    print("")
+    print("-- holding() across threads --")
+    size, reads = 1000, 3000
+    mixer = gp.Mixer(configmod.default_config())
+    mixer._held = {i: 1000 for i in range(size)}
+    mixer._hold_ref = {}
+
+    stop = threading.Event()
+
+    def churn():                      # stands in for the link thread
+        while not stop.is_set():
+            for i in range(size):
+                mixer._held[i] = 1000
+            for i in list(mixer._held):
+                del mixer._held[i]
+
+    # Left to itself this reproduced the fault about two runs in three,
+    # which is no guard at all - a third of the time it would wave the bug
+    # straight through. Cutting the switch interval makes the interpreter
+    # change threads often enough to catch it every time: measured 20 runs
+    # out of 20 against the unfixed code, and 0 out of 20 against this one.
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    worker = threading.Thread(target=churn, daemon=True)
+    worker.start()
+    try:
+        for _ in range(reads):
+            assert all(isinstance(n, int) for n in mixer.holding())
+    finally:
+        stop.set()
+        worker.join(timeout=2)
+        sys.setswitchinterval(interval)
+    print(f"   {reads} reads while channels were being released: no error")
+
+
 def _check_config_file():
     """A configuration survives a trip through a file, minus the latches.
 
@@ -540,9 +702,15 @@ def _check_config_file():
     assert ch.to_dict()["out_mid"] == 1550, "a midpoint must survive to_dict"
     print(f"   all {crsf.NUM_CHANNELS} channels identical after the round trip")
 
+    # The import dialog catches ValueError and nothing else, so a file it
+    # cannot use has to arrive as one. The last two are valid JSON of the
+    # wrong shape, which the named checks above let through to the shaping
+    # code, where unpacking them raised TypeError straight past the dialog.
     for body, why in ((b"not json at all", "garbage"),
                       (b'{"baud": 921600}', "no channel mapping"),
-                      (b"[1, 2, 3]", "not an object")):
+                      (b"[1, 2, 3]", "not an object"),
+                      (b'{"channels": [null]}', "a null channel"),
+                      (b'{"channels": [], "gamepads": 5}', "a scalar gamepads")):
         with open(path, "wb") as fh:
             fh.write(body)
         try:
@@ -550,6 +718,22 @@ def _check_config_file():
             raise AssertionError(f"{why} should have been refused")
         except ValueError as exc:
             print(f"   refused {why}: {str(exc)[:44]}...")
+
+    # load() has no dialog to fall back on: it runs from App.__init__,
+    # before there is a window at all, so anything it cannot make sense of
+    # has to come back as the defaults and a warning rather than as an
+    # exception that stops the program starting.
+    for body, why in ((b"[1, 2, 3]", "a list"),
+                      (b"5", "a bare number"),
+                      (b'{"gamepads": 5}', "a scalar gamepads"),
+                      (b'{"channels": ["ch1"]}', "a string channel")):
+        with open(path, "wb") as fh:
+            fh.write(body)
+        started, warning = configmod.load(path)
+        assert warning, f"load must warn about {why}"
+        assert len(started["channels"]) == crsf.NUM_CHANNELS, \
+            f"load must still hand back a usable config for {why}"
+        print(f"   started on defaults for {why}")
     os.unlink(path)
 
 
@@ -855,6 +1039,9 @@ def _run(wire):
     _check_arm_is_ch5()
     _check_arm_from_model()
     _check_latch_memory()
+    _check_throttle_cut()
+    _check_guarded_reset()
+    _check_hold_snapshot()
     _check_endpoints()
     _check_config_file()
     _check_fixed_value()
