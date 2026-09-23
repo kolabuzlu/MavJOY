@@ -533,19 +533,19 @@ def _check_map():
         # Plotting it would draw the aircraft off Africa and, worse, set
         # home there, so every distance afterwards would be nonsense.
         m.update_position({"lat": 0.0, "lon": 0.0, "sats": 0})
-        assert m.home is None and m.pos is None, "0,0 must not be plotted"
+        assert m.origin is None and m.pos is None, "0,0 must not be plotted"
         print("   a 0,0 'fix' is refused")
 
         m.update_position({"lat": 39.9334, "lon": 32.8597, "heading": 90,
                            "altitude_m": 100, "speed_kmh": 60, "sats": 12})
-        assert m.home == m.pos, "home should be set from the first real fix"
+        assert m.origin == m.pos, "the marker should be set from the first real fix"
         for i in range(1, 12):
             m.update_position({"lat": 39.9334 + i * 0.001, "lon": 32.8597,
                                "heading": 0, "sats": 12})
         assert len(m.trail) == 12, f"the trail should have 12 points, has {len(m.trail)}"
-        dist, _ = mv.distance_bearing(*m.home, *m.pos)
+        dist, _ = mv.distance_bearing(*m.origin, *m.pos)
         assert 1200 < dist < 1250, f"11 * 0.001 deg should be ~1225 m, got {dist:.0f}"
-        print(f"   home set from the first fix, trail {len(m.trail)} points, "
+        print(f"   marker set from the first fix, trail {len(m.trail)} points, "
               f"{dist:.0f} m out")
 
         # The view is centred between home and the aircraft, so the ground
@@ -560,9 +560,10 @@ def _check_map():
             f"400 m out should not be shown across {across:.0f} m of ground"
         print(f"   zoom {near} at 400 m ({across:.0f} m across), {far} at 6 km")
 
-        m.set_home()
-        assert m.home == m.pos and not m.trail, "Set home must recentre and clear"
-        print("   Set home recentres and clears the trail")
+        m.reset_marker()
+        assert m.origin == m.pos and not m.trail, (
+            "Reset marker must recentre and clear the trail")
+        print("   Reset marker recentres and clears the trail")
     finally:
         root.destroy()
 

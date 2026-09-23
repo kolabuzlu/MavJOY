@@ -1,7 +1,7 @@
 """A small moving map for the Telemetry tab.
 
-Two layers over one set of coordinates. The plot - home, the aircraft, its
-track, range rings - is drawn by this file and always correct. Map tiles
+Two layers over one set of coordinates. The plot - the marker, the
+aircraft, its track, range rings - is drawn here and always correct. Map tiles
 are painted behind it when they happen to be available.
 
 That order is deliberate. A flying field usually has no internet, and a
@@ -58,7 +58,13 @@ def metres_per_pixel(lat, zoom):
 
 
 def distance_bearing(lat1, lon1, lat2, lon2):
-    """Great-circle metres and initial bearing, home to aircraft."""
+    """Great-circle metres, and the initial bearing from 1 to 2.
+
+    Point 1 is the map marker and point 2 the aircraft, so the bearing is
+    where to look from the marker to see the aircraft. That is not the
+    aircraft's heading, which is where its nose is going and comes from
+    the GPS frame; the two agree only by coincidence.
+    """
     r = 6371000.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp = p2 - p1
@@ -187,7 +193,7 @@ class MapView(ttk.Frame):
         # widget, and overwriting it breaks every child made after.
         self._cw, self._ch = width, height
 
-        self.home = None             # (lat, lon)
+        self.origin = None             # (lat, lon)
         self.pos = None              # (lat, lon)
         self.heading = 0.0
         self.sats = 0
@@ -204,8 +210,15 @@ class MapView(ttk.Frame):
         self.show_tiles = tk.BooleanVar(value=True)
         ttk.Checkbutton(head, text="map tiles", variable=self.show_tiles,
                         command=self._tiles_toggled).pack(side="left")
-        ttk.Button(head, text="Set home", width=9,
-                   command=self.set_home).pack(side="right")
+        ttk.Button(head, text="Reset marker", width=12,
+                   command=self.reset_marker).pack(side="right")
+
+        ttk.Label(self, foreground=palette["muted"], wraplength=width,
+                  justify="left",
+                  text=("The marker is only what this screen measures from. "
+                        "The aircraft's RTL home is set by the flight "
+                        "controller when it arms, and nothing here changes "
+                        "it.")).pack(anchor="w", pady=(2, 0))
 
         self.canvas = tk.Canvas(self, width=width, height=height,
                                 background=palette["field"],
@@ -218,9 +231,18 @@ class MapView(ttk.Frame):
         self.draw()
 
     # ------------------------------------------------------------- inputs
-    def set_home(self):
+    def reset_marker(self):
+        """Measure from where the aircraft is now, and drop the old track.
+
+        Deliberately not called "home". A flight controller's home is the
+        point it returns to, set by the aircraft when it arms, and nothing
+        here can move it - this marker only says where distances and
+        bearings are measured from on this screen. A button that looked
+        like it moved the RTL point would be worth pressing in an
+        emergency, and would do nothing.
+        """
         if self.pos:
-            self.home = self.pos
+            self.origin = self.pos
             self.trail.clear()
             self.draw()
 
@@ -244,8 +266,8 @@ class MapView(ttk.Frame):
         self.sats = gps.get("sats", 0) or 0
         self.alt = gps.get("altitude_m", 0) or 0
         self.speed = gps.get("speed_kmh", 0.0) or 0.0
-        if self.home is None:
-            self.home = self.pos
+        if self.origin is None:
+            self.origin = self.pos
         if not self.trail or self.trail[-1] != self.pos:
             self.trail.append(self.pos)
         self.draw()
@@ -290,19 +312,19 @@ class MapView(ttk.Frame):
         self._images = []
         w, h = self._size()
 
-        if self.pos is None and self.home is None:
+        if self.pos is None and self.origin is None:
             c.create_text(w / 2, h / 2, text="waiting for a GPS position",
                           fill=self.pal["muted"])
             self.status.set("no GPS")
             return
 
-        anchor = self.pos or self.home
+        anchor = self.pos or self.origin
         dist = bearing = 0.0
-        if self.home and self.pos:
-            dist, bearing = distance_bearing(*self.home, *self.pos)
+        if self.origin and self.pos:
+            dist, bearing = distance_bearing(*self.origin, *self.pos)
 
-        centre_lat = (anchor[0] + self.home[0]) / 2 if self.home else anchor[0]
-        centre_lon = (anchor[1] + self.home[1]) / 2 if self.home else anchor[1]
+        centre_lat = (anchor[0] + self.origin[0]) / 2 if self.origin else anchor[0]
+        centre_lon = (anchor[1] + self.origin[1]) / 2 if self.origin else anchor[1]
         self._zoom = self._pick_zoom(centre_lat, dist)
 
         cx, cy = deg2px(centre_lat, centre_lon, self._zoom)
@@ -325,11 +347,11 @@ class MapView(ttk.Frame):
         self._draw_markers(c, to_canvas)
         self._draw_scale(c, centre_lat)
 
-        if self.home and self.pos:
+        if self.origin and self.pos:
             self.status.set(
-                f"{self._fmt_m(dist)}   bearing {bearing:03.0f}°   "
-                f"alt {self.alt:.0f} m   {self.speed:.0f} km/h   "
-                f"{self.sats} sats")
+                f"{self._fmt_m(dist)}   to plane {bearing:03.0f}°   "
+                f"hdg {self.heading:03.0f}°   alt {self.alt:.0f} m   "
+                f"{self.speed:.0f} km/h   {self.sats} sats")
         else:
             self.status.set(f"{self.sats} sats")
 
@@ -359,9 +381,9 @@ class MapView(ttk.Frame):
         return painted
 
     def _draw_rings(self, c, to_canvas, lat):
-        if not self.home:
+        if not self.origin:
             return
-        hx, hy = to_canvas(*self.home)
+        hx, hy = to_canvas(*self.origin)
         mpp = metres_per_pixel(lat, self._zoom)
         for metres in RING_STEPS:
             r = metres / mpp
@@ -381,8 +403,8 @@ class MapView(ttk.Frame):
         c.create_line(*pts, fill=self.pal["accent"], width=2, smooth=True)
 
     def _draw_markers(self, c, to_canvas):
-        if self.home:
-            hx, hy = to_canvas(*self.home)
+        if self.origin:
+            hx, hy = to_canvas(*self.origin)
             c.create_line(hx - 7, hy, hx + 7, hy, fill=self.pal["ok"], width=2)
             c.create_line(hx, hy - 7, hx, hy + 7, fill=self.pal["ok"], width=2)
             c.create_oval(hx - 5, hy - 5, hx + 5, hy + 5,
