@@ -164,6 +164,67 @@ def _command_name(name):
     return str(name).replace("_", "-") if major >= 5 else str(name)
 
 
+def _install_progress(on_progress, log):
+    """Send esptool's progress figures to `on_progress`, and give back an undo.
+
+    esptool draws its meter with rich, which renders only when it believes
+    it is writing to a terminal. Run from source that is near enough true
+    and the bar appears; in a windowed build it is not, so the meter
+    vanishes and a twelve second read looks like the app has hung.
+
+    progress_bar is the method esptool calls with the real numbers, before
+    any of that rendering is decided, so overriding it reports the same
+    figures either way. set_logger type-checks its argument, hence the
+    subclass rather than a stand-in object.
+    """
+    try:
+        import esptool.logger as eslog
+        from esptool.logger import log as esplog
+    except Exception:
+        return lambda: None
+
+    base = getattr(eslog, "EsptoolLogger", None)
+    if base is None or not hasattr(esplog, "set_logger"):
+        return lambda: None
+
+    class _Progress(base):
+        def progress_bar(self, cur_iter, total_iters, prefix="", suffix="",
+                         bar_length=30):
+            try:
+                on_progress(int(cur_iter), int(total_iters),
+                            str(prefix).strip(), str(suffix).strip())
+            except Exception:
+                pass
+
+    # Ask the proxy which logger is live rather than reading a class
+    # attribute. The singleton is held by esp_pylib's EspLog, and
+    # EsptoolLogger carries an `instance` of its own that set_logger never
+    # touches - so saving that one restores whatever happened to be there
+    # at import, which is right only by accident.
+    saved = None
+    try:
+        bound = esplog.progress_bar
+        saved = getattr(bound, "__self__", None)
+    except Exception:
+        pass
+
+    try:
+        esplog.set_logger(_Progress())
+    except Exception as exc:
+        log(f"(progress reporting unavailable: {exc})")
+        return lambda: None
+
+    def undo():
+        if saved is None:
+            return
+        try:
+            esplog.set_logger(saved)
+        except Exception:
+            pass
+
+    return undo
+
+
 def _capture_esptool_console(tee, log):
     """Point esptool's own console at `tee`, and give back an undo.
 
@@ -204,7 +265,7 @@ def _capture_esptool_console(tee, log):
     return undo
 
 
-def _esptool(port, *args, log):
+def _esptool(port, *args, log, progress=None):
     """Run esptool inside this process.
 
     Not as a subprocess: the obvious spelling is sys.executable -m esptool,
@@ -228,6 +289,10 @@ def _esptool(port, *args, log):
     log("$ esptool " + " ".join(argv))
 
     tee = _Tee(log)
+    # The logger goes in first: the console options below apply to
+    # whichever logger is current, so replacing it afterwards would throw
+    # them away and send the output back to the real stdout.
+    undo_logger = _install_progress(progress, log) if progress else (lambda: None)
     restore = _capture_esptool_console(tee, log)
     try:
         # redirect_stdout on its own is not enough - esptool prints through
@@ -249,9 +314,10 @@ def _esptool(port, *args, log):
     finally:
         tee.flush()
         restore()
+        undo_logger()
 
 
-def find_filesystem(port, log):
+def find_filesystem(port, log, progress=None):
     """Read the chip's partition table and locate its filesystem.
 
     Read rather than assumed, because the offset differs between ELRS
@@ -261,7 +327,7 @@ def find_filesystem(port, log):
     with tempfile.TemporaryDirectory() as tmp:
         blob = os.path.join(tmp, "ptable.bin")
         _esptool(port, "read_flash", hex(PART_TABLE_OFFSET),
-                 hex(PART_TABLE_SIZE), blob, log=log)
+                 hex(PART_TABLE_SIZE), blob, log=log, progress=progress)
         with open(blob, "rb") as fh:
             raw = fh.read()
 
@@ -343,7 +409,7 @@ def build_image(layout, size):
     return bytes(fs.context.buffer), payload
 
 
-def read_back(port, offset, size, log):
+def read_back(port, offset, size, log, progress=None):
     """What /hardware.json on the module actually says, or None."""
     try:
         from littlefs import LittleFS
@@ -351,7 +417,8 @@ def read_back(port, offset, size, log):
         return None
     with tempfile.TemporaryDirectory() as tmp:
         blob = os.path.join(tmp, "fs.bin")
-        _esptool(port, "read_flash", hex(offset), hex(size), blob, log=log)
+        _esptool(port, "read_flash", hex(offset), hex(size), blob, log=log,
+                 progress=progress)
         with open(blob, "rb") as fh:
             raw = fh.read()
     fs = LittleFS(block_size=LFS_BLOCK_SIZE,
@@ -370,7 +437,7 @@ def read_back(port, offset, size, log):
         return None
 
 
-def prepare(port, layout_path, log):
+def prepare(port, layout_path, log, progress=None):
     """Write the CRSF-over-USB layout, then read it back and check it."""
     layout = resolve_layout(layout_path)
     log(f"Layout: {os.path.basename(layout_path)}")
@@ -378,7 +445,7 @@ def prepare(port, layout_path, log):
         f"use_backpack {layout['use_backpack']}")
     log("")
 
-    offset, size = find_filesystem(port, log)
+    offset, size = find_filesystem(port, log, progress)
     image, payload = build_image(layout, size)
     log("")
     log(f"Built a {len(image)} byte image holding {len(payload)} bytes "
@@ -390,11 +457,12 @@ def prepare(port, layout_path, log):
             fh.write(image)
         log("")
         log("Writing the filesystem partition...")
-        _esptool(port, "write_flash", hex(offset), img, log=log)
+        _esptool(port, "write_flash", hex(offset), img, log=log,
+                 progress=progress)
 
     log("")
     log("Reading it back to check...")
-    got = read_back(port, offset, size, log)
+    got = read_back(port, offset, size, log, progress)
     if got is None:
         raise PrepError("The image was written but could not be read back. "
                         "The module will reformat anything it cannot mount "
@@ -412,12 +480,13 @@ def prepare(port, layout_path, log):
     return got
 
 
-def restore(port, log):
+def restore(port, log, progress=None):
     """Erase the filesystem, putting the built-in layout back."""
-    offset, size = find_filesystem(port, log)
+    offset, size = find_filesystem(port, log, progress)
     log("")
     log("Erasing the filesystem partition...")
-    _esptool(port, "erase_region", hex(offset), hex(size), log=log)
+    _esptool(port, "erase_region", hex(offset), hex(size), log=log,
+             progress=progress)
     log("")
     log("Done. The module is back on the layout built into its firmware:")
     log("CRSF on the module-bay pin, backpack enabled.")

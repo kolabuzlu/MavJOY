@@ -33,7 +33,7 @@ REFRESH_MS = 50          # GUI refresh, 20 Hz
 BAR_LEN = 150
 
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 
 def fmt_channel(value: int) -> str:
@@ -1075,6 +1075,19 @@ class App(tk.Tk):
                                       command=lambda: self.run_prep("restore"))
         self.restore_btn.pack(side="left", padx=8)
 
+        # Reading or writing the filesystem takes about twelve seconds, and
+        # esptool's own meter cannot be relied on to show it: rich draws
+        # that only when it thinks it is writing to a terminal, which a
+        # windowed build is not. These numbers come from esptool directly.
+        row = ttk.Frame(frm)
+        row.pack(fill="x", pady=(0, 8))
+        self.prep_progress = ttk.Progressbar(row, mode="determinate",
+                                             maximum=100, length=320)
+        self.prep_progress.pack(side="left")
+        self.prep_progress_var = tk.StringVar(value="")
+        ttk.Label(row, textvariable=self.prep_progress_var,
+                  foreground=self.pal["muted"]).pack(side="left", padx=10)
+
         wrap = ttk.Frame(frm)
         wrap.pack(fill="both", expand=True)
         self.prep_text = tk.Text(wrap, height=12, wrap="word",
@@ -1170,6 +1183,8 @@ class App(tk.Tk):
         self.prep_text.configure(state="normal")
         self.prep_text.delete("1.0", "end")
         self.prep_text.configure(state="disabled")
+        self.prep_progress["value"] = 0
+        self.prep_progress_var.set("starting…")
         self._prep_set_busy(True)
         threading.Thread(target=self._prep_worker, args=(what, port, path),
                          daemon=True).start()
@@ -1181,13 +1196,19 @@ class App(tk.Tk):
         for widget in (self.prep_btn, self.restore_btn, self.prep_browse):
             widget.configure(state=state)
 
+    def _prep_progress(self, done, total, prefix, suffix):
+        """Called from the worker thread; only ever touches the queue."""
+        self.prep_queue.put(("__progress__", done, total, suffix or prefix))
+
     def _prep_worker(self, what, port, path):
         """Runs off the GUI thread; talks back only through the queue."""
         try:
             if what == "prepare":
-                module_prep.prepare(port, path, self.prep_queue.put)
+                module_prep.prepare(port, path, self.prep_queue.put,
+                                    progress=self._prep_progress)
             else:
-                module_prep.restore(port, self.prep_queue.put)
+                module_prep.restore(port, self.prep_queue.put,
+                                    progress=self._prep_progress)
             self.prep_queue.put(("__done__", None))
         except module_prep.PrepError as exc:
             self.prep_queue.put(("__done__", str(exc)))
@@ -1199,9 +1220,16 @@ class App(tk.Tk):
         try:
             while True:
                 item = self.prep_queue.get_nowait()
-                if isinstance(item, tuple) and item and item[0] == "__done__":
-                    done, error = True, item[1]
-                    break
+                if isinstance(item, tuple) and item:
+                    if item[0] == "__done__":
+                        done, error = True, item[1]
+                        break
+                    if item[0] == "__progress__":
+                        _tag, made, total, text = item
+                        pct = (100.0 * made / total) if total else 0.0
+                        self.prep_progress["value"] = pct
+                        self.prep_progress_var.set(f"{pct:5.1f}%   {text}")
+                        continue
                 self._prep_say(str(item))
         except queue.Empty:
             pass
@@ -1211,6 +1239,8 @@ class App(tk.Tk):
             return
 
         self._prep_set_busy(False)
+        self.prep_progress["value"] = 0 if error else 100
+        self.prep_progress_var.set("failed" if error else "done")
         if error:
             self._prep_say("")
             self._prep_say("FAILED: " + error)

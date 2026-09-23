@@ -578,6 +578,30 @@ def _check_module_prep():
         f"esptool {major} wants {want}"
     print(f"   esptool {esptool.__version__}: uses {want!r}")
 
+    # Progress comes from overriding esptool's own progress_bar, because
+    # its drawn meter appears only when rich believes it is writing to a
+    # terminal - true enough from source, false in a windowed build, where
+    # a twelve second read would otherwise look like a hang. What matters
+    # here is that the swap goes in and comes back out: a logger left
+    # installed would keep every later esptool run reporting into a dead
+    # callback.
+    # Asked through the proxy, which is where esptool itself looks. The
+    # obvious spelling, EsptoolLogger.instance, is a different attribute
+    # that set_logger never updates, and reading it says nothing changed
+    # while the swap is plainly working.
+    from esptool.logger import log as esplog
+    live = lambda: type(esplog.progress_bar.__self__).__name__
+    before = live()
+    undo = mp._install_progress(lambda *a: None, lambda _s: None)
+    during = live()
+    undo()
+    after = live()
+    assert during != before, "the progress logger did not go in"
+    assert after == before, \
+        f"the original logger was not put back ({before} -> {after})"
+    print(f"   progress logger installs and restores "
+          f"({before} -> {during} -> {after})")
+
 
 def _check_throttle_cut():
     """The cut button drops the throttle to idle in every throttle mode.
