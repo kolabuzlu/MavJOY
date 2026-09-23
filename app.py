@@ -559,10 +559,6 @@ class App(tk.Tk):
         self.module_btn = ttk.Button(head, text="Read from module",
                                      command=self.read_module_settings)
         self.module_btn.pack(side="right")
-        self.module_hidden = tk.BooleanVar(value=False)
-        ttk.Checkbutton(head, text="show hidden", variable=self.module_hidden,
-                        command=self._render_fields).pack(side="right", padx=8)
-
         self.module_info_lbl = ttk.Label(
             tab, foreground=self.pal["muted"],
             text="Start the link, then read the settings from the module.")
@@ -1509,8 +1505,11 @@ class App(tk.Tk):
         field = self._fields.get(index)
         if field is None:
             return
-        if field.hidden and not self.module_hidden.get():
-            return
+        # Everything the module offers is shown. ExpressLRS marks a field
+        # hidden when it does not apply to the present setup - Wi-Fi while
+        # armed, say - and hiding those left the page looking short of
+        # settings that are plainly there in the handset script. The module
+        # refuses a write it will not accept anyway, and says why.
 
         body = self.module_body
         row = self._row
