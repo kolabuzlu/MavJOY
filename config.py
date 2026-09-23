@@ -73,6 +73,9 @@ DEFAULT_CONFIG = {
     # way, but the two say "armed" differently - see crsf.ArmWatch.
     "firmware": "ardupilot",
     "gamepads": [0, None],
+    # Where the ExpressLRS layout file for the TX module was last found.
+    # Only the TX module tab uses it; it has nothing to do with flying.
+    "layout_path": "",
     # Latch positions carried over from the last run, keyed by channel
     # number. Written when the app closes, not by Save, because it is a
     # record of where the controls were rather than a setting.
@@ -146,7 +149,7 @@ CONFIG_FORMAT = 1
 
 # Keys that record what this machine was doing rather than how the model is
 # set up, so they do not travel with an exported configuration.
-NOT_PORTABLE = ("latches",)
+NOT_PORTABLE = ("latches", "layout_path")
 
 
 def _normalise(data):

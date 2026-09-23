@@ -7,7 +7,12 @@ a = Analysis(
     binaries=[],
     datas=[('mavjoyback.png', '.'), ('mavjoy_icon.png', '.'), ('mavjoy.ico', '.'),
            ('mavjoy_lockup_48.png', '.'), ('mavjoy_lockup_64.png', '.'), ('mavjoy_lockup_80.png', '.'), ('mavjoy_lockup_96.png', '.'), ('mavjoy_lockup_128.png', '.')],
-    hiddenimports=[],
+    # esptool and littlefs are reached only from the TX module tab, through
+    # names PyInstaller cannot see: esptool dispatches its subcommands at
+    # run time, and littlefs loads a compiled extension. Without these the
+    # app builds and runs, and that one tab fails at the moment it is used.
+    hiddenimports=['esptool', 'esptool.cmds', 'esptool.targets',
+                   'littlefs', 'littlefs.lfs'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

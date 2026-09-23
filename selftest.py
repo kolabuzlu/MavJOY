@@ -481,6 +481,104 @@ def _check_endpoints():
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
 
 
+def _check_module_prep():
+    """The TX module tab's logic, as far as it goes without a module.
+
+    Flashing needs hardware, but everything that decides WHAT gets flashed
+    does not, and that is the half worth guarding: a layout built wrongly
+    would be written to a module that then comes up with no radio.
+    """
+    import module_prep as mp
+
+    print("")
+    print("-- module prep --")
+
+    stock = {
+        "serial_rx": 13, "serial_tx": 13,
+        "radio_miso": 19, "radio_mosi": 23, "radio_sck": 18, "radio_nss": 5,
+        "screen_type": 1, "misc_fan_en": 17, "power_values": [-18, -15, 2],
+        "use_backpack": True,
+        "debug_backpack_baud": 460800,
+        "debug_backpack_rx": 3, "debug_backpack_tx": 1,
+    }
+    path = os.path.join(tempfile.gettempdir(), "mavjoy_layout_test.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(stock, fh)
+
+    out = mp.resolve_layout(path)
+    print(f"   {len(stock)} fields in -> {len(out)} out")
+    assert out["serial_rx"] == 3 and out["serial_tx"] == 1, \
+        "CRSF must move onto UART0"
+    assert out["use_backpack"] is False, "the backpack must be switched off"
+    for key in mp.PREPARE_DROPS:
+        assert key not in out, f"{key} should have been dropped"
+    # Everything that is not ours must survive: hardware.json replaces the
+    # built-in layout, so a field lost here is a module with no radio.
+    for key in ("radio_miso", "radio_mosi", "radio_sck", "radio_nss",
+                "screen_type", "misc_fan_en", "power_values"):
+        assert out[key] == stock[key], f"{key} must be carried across"
+    print("   radio, screen, fan and power table carried across untouched")
+
+    # A layout with no radio pins is not a layout, and saying so here is
+    # much cheaper than finding out after it is on the module.
+    for body, why in (({"hello": 1}, "not a layout"),
+                      ([1, 2, 3], "not an object"),
+                      ("nonsense", "not JSON at all")):
+        with open(path, "w", encoding="utf-8") as fh:
+            if body == "nonsense":
+                fh.write("nonsense")
+            else:
+                json.dump(body, fh)
+        try:
+            mp.resolve_layout(path)
+            raise AssertionError(f"{why} should have been refused")
+        except mp.PrepError as exc:
+            print(f"   refused {why}: {str(exc)[:44]}...")
+    os.unlink(path)
+
+    # The image has to be mountable, or the module reformats it and keeps
+    # its built-in layout - the change silently not taking.
+    size = 0x20000
+    image, payload = mp.build_image(out, size)
+    assert len(image) == size, "the image must fill the partition"
+    from littlefs import LittleFS
+    fs = LittleFS(block_size=mp.LFS_BLOCK_SIZE, block_count=size // mp.LFS_BLOCK_SIZE,
+                  read_size=mp.LFS_READ_SIZE, prog_size=mp.LFS_PROG_SIZE,
+                  name_max=mp.LFS_NAME_MAX, disk_version=mp.LFS_DISK_VERSION,
+                  mount=False)
+    fs.context.buffer = bytearray(image)
+    fs.mount()
+    with fs.open("/hardware.json", "rb") as fh:
+        back = json.loads(fh.read().decode("utf-8"))
+    assert back == out, "the layout must survive the filesystem image"
+    print(f"   {len(image)} byte image mounts and reads back identical")
+
+    # esptool's progress meter redraws one line with a carriage return. It
+    # was reaching the log twice over: once per redraw, and once more at
+    # the end, because flush did not filter what write did.
+    lines = []
+    tee = mp._Tee(lines.append)
+    tee.write("Connecting...\n")
+    tee.write("Reading from 0x00009000\n")
+    tee.write("====>  50.0% 2.00kB/4.00kB [1s]\r")
+    tee.write("=========> 100.0% 4.00kB/4.00kB [2s]")
+    tee.flush()
+    tee.write("Read 4096 bytes from 0x00008000\n")
+    tee.flush()
+    assert lines == ["Connecting...", "Read 4096 bytes from 0x00008000"], \
+        f"the meter must be filtered on write and on flush, got {lines}"
+    print("   progress meter filtered, summary lines kept")
+
+    # esptool 5 warns on every deprecated spelling; esptool 4 knows only
+    # those. Either way the command has to be one the installed one likes.
+    import esptool
+    major = int(str(esptool.__version__).split(".")[0])
+    want = "read-flash" if major >= 5 else "read_flash"
+    assert mp._command_name("read_flash") == want, \
+        f"esptool {major} wants {want}"
+    print(f"   esptool {esptool.__version__}: uses {want!r}")
+
+
 def _check_throttle_cut():
     """The cut button drops the throttle to idle in every throttle mode.
 
@@ -1041,6 +1139,7 @@ def _run(wire):
     _check_latch_memory()
     _check_throttle_cut()
     _check_guarded_reset()
+    _check_module_prep()
     _check_hold_snapshot()
     _check_endpoints()
     _check_config_file()

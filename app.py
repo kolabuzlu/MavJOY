@@ -17,6 +17,7 @@ import dataclasses
 import os
 import queue
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -25,13 +26,14 @@ import config as configmod
 import crsf
 import gamepad as gp
 import link as linkmod
+import module_prep
 import theme
 
 REFRESH_MS = 50          # GUI refresh, 20 Hz
 BAR_LEN = 150
 
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 
 def fmt_channel(value: int) -> str:
@@ -427,6 +429,7 @@ class App(tk.Tk):
         self._build_module_tab(nb)
         self._build_telemetry_tab(nb)
         self._build_log_tab(nb)
+        self._build_prep_tab(nb)
 
     # ------------------------------------------------------------- outputs
     OUT_MIN_US = crsf.US_MIN
@@ -1004,6 +1007,223 @@ class App(tk.Tk):
         self.log_text.tag_configure("error", foreground=self.pal["danger"])
         self.log_text.tag_configure("warn", foreground=self.pal["warn"])
         self.log_text.tag_configure("info", foreground=self.pal["text"])
+
+    # --------------------------------------------------- TX module prep
+    PREP_FILETYPES = [("ExpressLRS layout", "*.json"), ("All files", "*.*")]
+
+    def _build_prep_tab(self, nb):
+        """Set a TX module up to take CRSF over its own USB socket.
+
+        Nothing here touches the link, the mapping or anything that flies.
+        It is a one-off bench job on the module itself, kept in the app so
+        that setting a module up does not mean a Python toolchain and a
+        command line.
+        """
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Module prep")
+        frm = ttk.Frame(tab)
+        frm.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(
+            frm, justify="left", foreground=self.pal["muted"], wraplength=760,
+            text=(
+                "Makes the module's own USB socket its CRSF port, so MavJOY "
+                "can talk to it with no adapter soldered to the module bay. "
+                "It writes one small file to the module's filesystem and "
+                "leaves the firmware alone.\n\n"
+                "Preparing switches the backpack off, and with it the "
+                "module's WiFi — CRSF and the backpack both want UART0 and "
+                "there is only one. Restore puts the module back as it came.\n\n"
+                "Before either: set the DIP switches so USB reaches the ESP32, "
+                "stop the link, and close anything else holding the port."),
+        ).pack(anchor="w", pady=(0, 12))
+
+        row = ttk.Frame(frm)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Port", width=8).pack(side="left")
+        self.prep_port_var = tk.StringVar()
+        self.prep_port = ttk.Combobox(row, textvariable=self.prep_port_var,
+                                      width=34, state="readonly")
+        self.prep_port.pack(side="left")
+        ttk.Button(row, text="Refresh", width=9,
+                   command=self.refresh_prep_ports).pack(side="left", padx=6)
+
+        row = ttk.Frame(frm)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Layout", width=8).pack(side="left")
+        self.prep_layout_var = tk.StringVar(value=self.cfg.get("layout_path", ""))
+        ttk.Entry(row, textvariable=self.prep_layout_var, width=52,
+                  state="readonly").pack(side="left")
+        self.prep_browse = ttk.Button(row, text="Browse…", width=9,
+                                      command=self.choose_layout)
+        self.prep_browse.pack(side="left", padx=6)
+
+        ttk.Label(frm, foreground=self.pal["muted"], wraplength=760, justify="left",
+                  text=("The layout is your module's own pin list, from the "
+                        "ExpressLRS targets repository, TX folder. It is needed "
+                        "because the file written here replaces the built-in "
+                        "layout rather than adding to it, so it has to carry "
+                        "the radio and screen pins too. Chosen once and "
+                        "remembered.")).pack(anchor="w", pady=(2, 12))
+
+        row = ttk.Frame(frm)
+        row.pack(fill="x", pady=(0, 10))
+        self.prep_btn = ttk.Button(row, text="Prepare module", width=18,
+                                   command=lambda: self.run_prep("prepare"))
+        self.prep_btn.pack(side="left")
+        self.restore_btn = ttk.Button(row, text="Restore to stock", width=18,
+                                      command=lambda: self.run_prep("restore"))
+        self.restore_btn.pack(side="left", padx=8)
+
+        wrap = ttk.Frame(frm)
+        wrap.pack(fill="both", expand=True)
+        self.prep_text = tk.Text(wrap, height=12, wrap="word",
+                                 font=("TkFixedFont", 9),
+                                 background=self.pal["field"],
+                                 foreground=self.pal["text"],
+                                 insertbackground=self.pal["text"],
+                                 selectbackground=self.pal["select_bg"],
+                                 highlightthickness=0, borderwidth=0)
+        sb = ttk.Scrollbar(wrap, command=self.prep_text.yview)
+        self.prep_text.configure(yscrollcommand=sb.set, state="disabled")
+        sb.pack(side="right", fill="y")
+        self.prep_text.pack(side="left", fill="both", expand=True)
+
+        self.prep_queue = queue.Queue()
+        self._prep_running = False
+        self.refresh_prep_ports()
+
+    def refresh_prep_ports(self):
+        """Its own port list, because a module that has not been prepared
+        yet may well come up on a different port from the one the link
+        last used."""
+        self._prep_ports = linkmod.list_serial_ports()
+        self.prep_port["values"] = [f"{dev}   {desc}".strip()
+                                    for dev, desc in self._prep_ports]
+        here = [dev for dev, _d in self._prep_ports]
+        wanted = self.cfg.get("port", "")
+        if wanted in here:
+            self.prep_port.current(here.index(wanted))
+        elif here:
+            self.prep_port.current(0)
+
+    def _prep_selected_port(self):
+        label = self.prep_port_var.get()
+        return label.split()[0] if label else ""
+
+    def choose_layout(self):
+        path = filedialog.askopenfilename(
+            parent=self, title="Choose the module's layout file",
+            filetypes=self.PREP_FILETYPES)
+        if not path:
+            return
+        try:
+            module_prep.resolve_layout(path)
+        except module_prep.PrepError as exc:
+            messagebox.showerror("Not a layout file", str(exc))
+            return
+        self.prep_layout_var.set(path)
+        self.cfg["layout_path"] = path
+        configmod.save(self.cfg)
+        self.log("info", f"Module layout file set to {os.path.basename(path)}")
+
+    def run_prep(self, what):
+        if self._prep_running:
+            return
+        if self.link and self.link.running:
+            messagebox.showwarning(
+                "Link running",
+                "Stop the link first. This writes to the module's flash, and "
+                "it cannot be done while MavJOY is holding the port open.")
+            return
+        port = self._prep_selected_port()
+        if not port:
+            messagebox.showwarning("No port", "Choose the module's port first.")
+            return
+
+        path = self.prep_layout_var.get().strip()
+        if what == "prepare":
+            if not path or not os.path.exists(path):
+                messagebox.showwarning(
+                    "No layout file",
+                    "Choose your module's layout file first. It comes from the "
+                    "ExpressLRS targets repository, in the TX folder, and its "
+                    "name has to match your module.")
+                return
+            ok = messagebox.askokcancel(
+                "Prepare the module",
+                f"Write a new pin layout to the module on {port}?\n\n"
+                f"CRSF moves onto the USB port, and the backpack — with the "
+                f"module's WiFi — is switched off.\n\n"
+                f"Restore undoes this completely.")
+        else:
+            ok = messagebox.askokcancel(
+                "Restore the module",
+                f"Erase the filesystem on the module on {port}?\n\n"
+                f"It goes back to the layout built into its firmware: CRSF on "
+                f"the module-bay pin, backpack enabled.\n\n"
+                f"MavJOY will not be able to reach it over USB afterwards "
+                f"until you prepare it again.")
+        if not ok:
+            return
+
+        self.prep_text.configure(state="normal")
+        self.prep_text.delete("1.0", "end")
+        self.prep_text.configure(state="disabled")
+        self._prep_set_busy(True)
+        threading.Thread(target=self._prep_worker, args=(what, port, path),
+                         daemon=True).start()
+        self.after(80, self._prep_drain)
+
+    def _prep_set_busy(self, busy):
+        self._prep_running = busy
+        state = "disabled" if busy else "normal"
+        for widget in (self.prep_btn, self.restore_btn, self.prep_browse):
+            widget.configure(state=state)
+
+    def _prep_worker(self, what, port, path):
+        """Runs off the GUI thread; talks back only through the queue."""
+        try:
+            if what == "prepare":
+                module_prep.prepare(port, path, self.prep_queue.put)
+            else:
+                module_prep.restore(port, self.prep_queue.put)
+            self.prep_queue.put(("__done__", None))
+        except module_prep.PrepError as exc:
+            self.prep_queue.put(("__done__", str(exc)))
+        except Exception as exc:                      # never strand the button
+            self.prep_queue.put(("__done__", f"{type(exc).__name__}: {exc}"))
+
+    def _prep_drain(self):
+        done, error = False, None
+        try:
+            while True:
+                item = self.prep_queue.get_nowait()
+                if isinstance(item, tuple) and item and item[0] == "__done__":
+                    done, error = True, item[1]
+                    break
+                self._prep_say(str(item))
+        except queue.Empty:
+            pass
+
+        if not done:
+            self.after(80, self._prep_drain)
+            return
+
+        self._prep_set_busy(False)
+        if error:
+            self._prep_say("")
+            self._prep_say("FAILED: " + error)
+            self.log("error", f"Module prep failed: {error}")
+            messagebox.showerror("Module prep failed", error)
+        else:
+            self.log("info", "Module prep finished")
+
+    def _prep_say(self, line):
+        self.prep_text.configure(state="normal")
+        self.prep_text.insert("end", line + "\n")
+        self.prep_text.see("end")
+        self.prep_text.configure(state="disabled")
 
     def _build_statusbar(self):
         self.status_var = tk.StringVar(value="")
@@ -2483,7 +2703,12 @@ class App(tk.Tk):
             "so the module behaves exactly as if a handset were driving it.\n\n"
             "If channel data stops (gamepad unplugged, app closed), the module's "
             "UART watchdog drops the RF link and the receiver goes to its own "
-            "failsafe. Set that failsafe up on the aircraft before flying.")
+            "failsafe. Set that failsafe up on the aircraft before flying.\n\n"
+            "Free software under the GNU General Public License, version 3 or "
+            "later, with no warranty. See LICENSE.\n\n"
+            "Includes esptool (GPL v2 or later) and littlefs-python (BSD "
+            "3-clause), used by the Module prep tab; pyserial (BSD) and "
+            "pygame-ce (LGPL v2.1). Source: github.com/kolabuzlu/MavJOY")
 
     def on_close(self):
         self.stop_link(reason="application closing")
