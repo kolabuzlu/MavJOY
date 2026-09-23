@@ -26,6 +26,7 @@ import config as configmod
 import crsf
 import gamepad as gp
 import link as linkmod
+import mapview
 import module_prep
 import theme
 
@@ -91,6 +92,7 @@ class App(tk.Tk):
         self._fc_talking = False            # anything arriving from the FC
         self._held_from_drop = None         # values a dropped link left behind
         self._telem_gap = {}                # key -> [last _t, last gap, worst]
+        self._last_gps_t = None             # so the map redraws on new fixes only
         self._mode_since = 0.0              # first flight-mode frame
         self._said_star_hint = False
         self._pending_write = None          # (field index, value) we asked for
@@ -973,9 +975,24 @@ class App(tk.Tk):
     def _build_telemetry_tab(self, nb):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Telemetry")
-        wrap = ttk.Frame(tab)
-        wrap.pack(fill="both", expand=True, padx=10, pady=10)
-        self.telem_text = tk.Text(wrap, height=24, wrap="none",
+        outer = ttk.Frame(tab)
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # The map sits beside the figures rather than replacing them: the
+        # numbers are what you read on the bench, the map is what you
+        # glance at in the air.
+        self.map = mapview.MapView(outer, self.pal,
+                                   os.path.join(configmod.base_dir(),
+                                                "map_tiles"))
+        self.map.pack(side="right", fill="y", padx=(10, 0))
+
+        wrap = ttk.Frame(outer)
+        wrap.pack(side="left", fill="both", expand=True)
+        # width is set explicitly because a Text asks for 80 characters by
+        # default, which is wider than the window has to spare once the map
+        # is beside it - and the map, packed second, is what gets pushed
+        # off the edge.
+        self.telem_text = tk.Text(wrap, height=24, width=58, wrap="none",
                                   font=("TkFixedFont", 10),
                                   background=self.pal["field"],
                                   foreground=self.pal["text"],
@@ -2476,6 +2493,16 @@ class App(tk.Tk):
     def _update_telemetry(self, telem, stats):
         lines = []
         now = time.monotonic()
+
+        # The map redraws only on a fresh fix, or when a tile it asked for
+        # earlier finally lands. Both are rare next to the 20 Hz display
+        # tick, and redrawing a canvas of tiles at that rate would cost far
+        # more than it showed.
+        gps = telem.get("gps")
+        if gps and gps.get("_t") != self._last_gps_t:
+            self._last_gps_t = gps.get("_t")
+            self.map.update_position(gps)
+        self.map.poll()
         for key in ("mode", "link", "battery", "attitude", "baro", "vario",
                     "gps", "unknown"):
             data = telem.get(key)

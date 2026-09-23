@@ -16,6 +16,10 @@ import time
 
 import serial
 
+import math
+import tkinter as tk
+import theme
+
 import config as configmod
 import crsf
 import gamepad as gp
@@ -479,6 +483,88 @@ def _check_endpoints():
     crept = crsf.crsf_to_us(held[0])
     print(f"   200 frames with the device gone: {crept:.0f} us")
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
+
+
+def _check_map():
+    """The moving map: its projection, and what it refuses to plot."""
+    import mapview as mv
+
+    print("")
+    print("-- map --")
+
+    # The projection has to be the real Web Mercator one, or the aircraft
+    # sits over the wrong piece of ground - which is worse than no map,
+    # because it looks authoritative. Checked against the formulation on
+    # the OSM wiki, written a different way.
+    def reference(lat, lon, z):
+        n = 2 ** z
+        r = math.radians(lat)
+        return ((lon + 180.0) / 360.0 * n,
+                (1.0 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2.0 * n)
+
+    for lat, lon in ((51.5007, -0.1246), (39.9334, 32.8597),
+                     (-33.8568, 151.2153), (0.0, 0.0)):
+        for z in (12, 15, 17):
+            px, py = mv.deg2px(lat, lon, z)
+            rx, ry = reference(lat, lon, z)
+            assert abs(px / mv.TILE_SIZE - rx) < 1e-9, f"x wrong at {lat},{lon} z{z}"
+            assert abs(py / mv.TILE_SIZE - ry) < 1e-9, f"y wrong at {lat},{lon} z{z}"
+    print("   projection matches the reference at 12 points")
+
+    # One degree of latitude is about 111 km anywhere.
+    d, b = mv.distance_bearing(39.0, 32.0, 40.0, 32.0)
+    assert 110000 < d < 112000, f"a degree of latitude came out {d:.0f} m"
+    assert b < 0.01 or b > 359.99, f"due north came out as {b:.1f} deg"
+    d2, b2 = mv.distance_bearing(39.0, 32.0, 39.0, 33.0)
+    assert 86000 < d2 < 87500, f"a degree of longitude at 39N came out {d2:.0f} m"
+    assert 89 < b2 < 91, f"due east came out as {b2:.1f} deg"
+    print(f"   1 deg north {d/1000:.1f} km bearing {b:.0f}, "
+          f"1 deg east {d2/1000:.1f} km bearing {b2:.0f}")
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        m = mv.MapView(root, theme.DARK,
+                       os.path.join(tempfile.gettempdir(), "mavjoy_map_test"))
+        m.tiles.enabled = False          # no network from the selftest
+        root.update()
+
+        # A receiver with no fix reports 0,0 - which is in the Atlantic.
+        # Plotting it would draw the aircraft off Africa and, worse, set
+        # home there, so every distance afterwards would be nonsense.
+        m.update_position({"lat": 0.0, "lon": 0.0, "sats": 0})
+        assert m.home is None and m.pos is None, "0,0 must not be plotted"
+        print("   a 0,0 'fix' is refused")
+
+        m.update_position({"lat": 39.9334, "lon": 32.8597, "heading": 90,
+                           "altitude_m": 100, "speed_kmh": 60, "sats": 12})
+        assert m.home == m.pos, "home should be set from the first real fix"
+        for i in range(1, 12):
+            m.update_position({"lat": 39.9334 + i * 0.001, "lon": 32.8597,
+                               "heading": 0, "sats": 12})
+        assert len(m.trail) == 12, f"the trail should have 12 points, has {len(m.trail)}"
+        dist, _ = mv.distance_bearing(*m.home, *m.pos)
+        assert 1200 < dist < 1250, f"11 * 0.001 deg should be ~1225 m, got {dist:.0f}"
+        print(f"   home set from the first fix, trail {len(m.trail)} points, "
+              f"{dist:.0f} m out")
+
+        # The view is centred between home and the aircraft, so the ground
+        # it must cover is the gap between them - and it has to be zoomed
+        # in far enough that a small circuit is not a dot.
+        near = m._pick_zoom(39.93, 400)
+        far = m._pick_zoom(39.93, 6000)
+        assert near > far, "a closer aircraft must give a closer zoom"
+        assert mv.MIN_ZOOM <= far and near <= mv.MAX_ZOOM
+        across = mv.metres_per_pixel(39.93, near) * min(m._size())
+        assert across < 400 * 4, \
+            f"400 m out should not be shown across {across:.0f} m of ground"
+        print(f"   zoom {near} at 400 m ({across:.0f} m across), {far} at 6 km")
+
+        m.set_home()
+        assert m.home == m.pos and not m.trail, "Set home must recentre and clear"
+        print("   Set home recentres and clears the trail")
+    finally:
+        root.destroy()
 
 
 def _check_module_prep():
@@ -1163,6 +1249,7 @@ def _run(wire):
     _check_latch_memory()
     _check_throttle_cut()
     _check_guarded_reset()
+    _check_map()
     _check_module_prep()
     _check_hold_snapshot()
     _check_endpoints()

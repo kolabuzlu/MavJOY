@@ -27,3 +27,6 @@ build/
 dist/
 *.spec.bak
 MavJOY-*.zip
+
+# Map tiles cached from openstreetmap.org for the Telemetry map.
+map_tiles/
