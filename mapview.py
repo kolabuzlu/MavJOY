@@ -34,6 +34,13 @@ TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 USER_AGENT = "MavJOY/1.1 (+https://github.com/kolabuzlu/MavJOY)"
 
 MIN_ZOOM, MAX_ZOOM = 9, 17
+
+# About nine tiles cover the canvas. The rest is slack for panning and for
+# the zoom changing as the aircraft moves out and back, which is what
+# makes an unbounded cache grow: a long session over several flights keeps
+# visiting new (z,x,y) and never lets one go.
+MAX_TILES_IN_MEMORY = 160
+MAX_CACHE_BYTES = 80 * 1024 * 1024
 TRAIL_MAX = 900                  # about 15 minutes at 1 Hz
 FETCH_TIMEOUT = 6.0
 
@@ -51,6 +58,23 @@ def deg2px(lat, lon, zoom):
     rad = math.radians(lat)
     y = (1.0 - math.asinh(math.tan(rad)) / math.pi) / 2.0 * n
     return x, y
+
+
+def wrap_lon(lon, near):
+    """`lon` expressed as the value within 180 degrees of `near`.
+
+    Longitude is a circle cut at the antimeridian, and every sum or
+    average of two of them is wrong across that cut. An aircraft at
+    -179.9 and a marker at 179.9 are 17 km apart, but averaged naively
+    they place the view at 0 - half a world away, with both markers
+    billions of pixels off-canvas and the map apparently empty.
+    """
+    return near + (((lon - near + 180.0) % 360.0) - 180.0)
+
+
+def mid_lon(a, b):
+    """The midpoint of two longitudes, across the antimeridian or not."""
+    return ((wrap_lon(b, a) + a) / 2.0 + 180.0) % 360.0 - 180.0
 
 
 def metres_per_pixel(lat, zoom):
@@ -106,6 +130,7 @@ class TileStore:
 
     def _run(self):
         import urllib.request
+        self._prune_disk()
         while True:
             try:
                 key = self._queue.get(timeout=30)
@@ -128,11 +153,57 @@ class TileStore:
             except Exception as exc:
                 self._done.put((key, None, exc))
 
+    def _prune_disk(self):
+        """Keep the tile folder under a size, oldest out first.
+
+        Runs once on the worker thread rather than at start-up, so walking
+        the folder never delays the window appearing. Tiles are 5-20 kB
+        each, so the limit is thousands of them - a cap rather than a
+        policy, and enough that a season of flying from one field never
+        reaches it.
+        """
+        try:
+            files = []
+            total = 0
+            for root, _dirs, names in os.walk(self.cache_dir):
+                for name in names:
+                    p = os.path.join(root, name)
+                    try:
+                        st = os.stat(p)
+                    except OSError:
+                        continue
+                    files.append((st.st_mtime, st.st_size, p))
+                    total += st.st_size
+            if total <= MAX_CACHE_BYTES:
+                return
+            files.sort()                     # oldest first
+            for _mtime, size, p in files:
+                if total <= MAX_CACHE_BYTES:
+                    break
+                try:
+                    os.remove(p)
+                    total -= size
+                except OSError:
+                    pass
+        except Exception:
+            pass                             # a cache is never worth a crash
+
+    def _remember(self, key, img):
+        """Keep the tile, and drop the least recently wanted one."""
+        self.images[key] = img
+        while len(self.images) > MAX_TILES_IN_MEMORY:
+            # Dicts keep insertion order, so the first key is the oldest.
+            # Anything still on the canvas is held by MapView._images, so
+            # evicting it here does not blank the map.
+            self.images.pop(next(iter(self.images)))
+
     def get(self, z, x, y):
         """A PhotoImage if one is to hand, else None; never blocks."""
         key = (z, x, y)
         if key in self.images:
-            return self.images[key]
+            img = self.images.pop(key)      # pop and re-add = move to newest
+            self.images[key] = img
+            return img
         if key in self._failed:
             return None
 
@@ -141,7 +212,7 @@ class TileStore:
             try:
                 with open(path, "rb") as fh:
                     img = tk.PhotoImage(data=fh.read())
-                self.images[key] = img
+                self._remember(key, img)
                 return img
             except Exception:
                 self._failed.add(key)
@@ -168,7 +239,7 @@ class TileStore:
                     self.online = False
                 continue
             try:
-                self.images[key] = tk.PhotoImage(data=blob)
+                self._remember(key, tk.PhotoImage(data=blob))
                 self.online = True
                 got = True
             except Exception:
@@ -176,10 +247,15 @@ class TileStore:
 
     def forget_failures(self):
         """Let tiles that failed be tried again - after the internet
-        arrives, say, or when the user asks for tiles a second time."""
-        self._failed.clear()
+        arrives, say, or when the user asks for tiles a second time.
+
+        Only the failures. These two lines used to run the other way
+        round, subtracting an already-emptied set and then clearing
+        _asked wholesale, which also forgot the tiles still sitting in
+        the queue and asked for them a second time.
+        """
         self._asked -= self._failed
-        self._asked.clear()
+        self._failed.clear()
 
 
 class MapView(ttk.Frame):
@@ -324,14 +400,19 @@ class MapView(ttk.Frame):
             dist, bearing = distance_bearing(*self.origin, *self.pos)
 
         centre_lat = (anchor[0] + self.origin[0]) / 2 if self.origin else anchor[0]
-        centre_lon = (anchor[1] + self.origin[1]) / 2 if self.origin else anchor[1]
+        centre_lon = (mid_lon(self.origin[1], anchor[1]) if self.origin
+                      else anchor[1])
         self._zoom = self._pick_zoom(centre_lat, dist)
 
         cx, cy = deg2px(centre_lat, centre_lon, self._zoom)
         ox, oy = cx - w / 2, cy - h / 2
 
         def to_canvas(lat, lon):
-            px, py = deg2px(lat, lon, self._zoom)
+            # Unwrapped against the centre first. Centring correctly is not
+            # enough on its own: projected independently, 179.9 and -179.9
+            # land at opposite ends of the world map, and the track would
+            # be drawn straight across it.
+            px, py = deg2px(lat, wrap_lon(lon, centre_lon), self._zoom)
             return px - ox, py - oy
 
         # Rings, labels and the scale bar have to read against whatever is

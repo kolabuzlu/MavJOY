@@ -5,3 +5,8 @@ pyserial>=3.5
 # pygame`, same joystick API. Installing both would collide, so pick one.
 pygame>=2.1.0; python_version < "3.13"
 pygame-ce>=2.5.0; python_version >= "3.13"
+
+# Only the Module prep tab needs these: it writes an ExpressLRS pin
+# layout into the TX module.  The rest of MavJOY runs without them.
+esptool>=4.6
+littlefs-python>=0.12

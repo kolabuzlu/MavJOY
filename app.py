@@ -1154,8 +1154,26 @@ class App(tk.Tk):
             return
         self.prep_layout_var.set(path)
         self.cfg["layout_path"] = path
-        configmod.save(self.cfg)
+        self._save_one("layout_path", path, "the layout file")
         self.log("info", f"Module layout file set to {os.path.basename(path)}")
+
+    def _save_one(self, key, value, what):
+        """Persist one setting without committing unsaved tab edits.
+
+        self.cfg is live: on_channel_changed writes into it as the widgets
+        are touched, long before anyone presses Save. So an unrelated
+        action that wrote the whole of it would quietly commit a mapping
+        that was only being tried out - an arm channel among it. The file
+        on disk is re-read and only this one key is changed.
+        """
+        try:
+            saved, _warning = configmod.load()
+            saved[key] = value
+            configmod.save(saved)
+            return True
+        except Exception as exc:
+            self.log("warn", f"Could not save {what}: {exc}")
+            return False
 
     def run_prep(self, what):
         if self._prep_running:
@@ -2390,12 +2408,7 @@ class App(tk.Tk):
         self._armed_report = None
         self._said_star_hint = False
         self._mode_since = 0.0
-        try:
-            saved, _warning = configmod.load()
-            saved["firmware"] = chosen
-            configmod.save(saved)
-        except Exception as exc:
-            self.log("warn", f"Could not save the firmware setting: {exc}")
+        self._save_one("firmware", chosen, "the firmware setting")
         self.log("info", f"Telemetry now read as "
                          f"{self.FIRMWARE_LABELS[chosen]}.")
 
@@ -2768,6 +2781,23 @@ class App(tk.Tk):
             "pygame-ce (LGPL v2.1). Source: github.com/kolabuzlu/MavJOY")
 
     def on_close(self):
+        # Closing mid-flash kills the worker where it stands: it is a
+        # daemon thread, so destroy() ends the interpreter under it and an
+        # erase or a half-written filesystem image is simply abandoned.
+        # The module recovers from an image it cannot mount, but it can
+        # also be left sitting in the bootloader wanting a power cycle,
+        # and there is no reason to allow that by accident. Asked rather
+        # than refused, so a job that has genuinely hung cannot trap
+        # anyone in the app.
+        if getattr(self, "_prep_running", False):
+            if not messagebox.askokcancel(
+                    "Module prep is running",
+                    "MavJOY is writing to the TX module's flash.\n\n"
+                    "Closing now interrupts it partway through. The module "
+                    "recovers on its own from a half-written layout, but may "
+                    "need unplugging and plugging back in.\n\n"
+                    "Close anyway?"):
+                return
         self.stop_link(reason="application closing")
         self._remember_latches()
         self.gamepad.stop()
@@ -2780,13 +2810,10 @@ class App(tk.Tk):
         closing the window is not a Save, and unsaved edits in the tabs
         should not be committed by one.
         """
-        try:
-            saved, _warning = configmod.load()
-            saved["latches"] = self.mixer.latch_state()
-            configmod.save(saved)
-        except Exception as exc:
-            # Closing must not fail over a file that will not be written.
-            self.log("warn", f"Could not remember channel positions: {exc}")
+        # Closing must not fail over a file that will not be written,
+        # which _save_one already guarantees.
+        self._save_one("latches", self.mixer.latch_state(),
+                       "channel positions")
 
 
 def main():

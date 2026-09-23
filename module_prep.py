@@ -468,10 +468,14 @@ def prepare(port, layout_path, log, progress=None):
                         "The module will reformat anything it cannot mount "
                         "and use its built-in layout, so it is not harmed - "
                         "but the change has not taken. Try Restore.")
-    if got.get("serial_rx") != 3 or got.get("serial_tx") != 1 \
-            or got.get("use_backpack"):
-        raise PrepError("The layout read back does not match what was "
-                        "written. Try Restore and report this.")
+    # Checked against PREPARE_SETS rather than against the numbers written
+    # out again. Two copies of 3 and 1 is two places to change, and the one
+    # that gets missed is this one - which would then either call every
+    # good flash a failure or wave a bad one through.
+    wrong = {k: got.get(k) for k, v in PREPARE_SETS.items() if got.get(k) != v}
+    if wrong:
+        raise PrepError(f"The layout read back does not match what was "
+                        f"written ({wrong}). Try Restore and report this.")
 
     log("")
     log("Confirmed on the module: CRSF is on GPIO 3/1, backpack off.")

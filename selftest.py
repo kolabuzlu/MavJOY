@@ -17,7 +17,6 @@ import time
 import serial
 
 import math
-import tkinter as tk
 import theme
 
 import config as configmod
@@ -485,12 +484,79 @@ def _check_endpoints():
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
 
 
+def _check_config_writes():
+    """Only Save and Import may write the live configuration to disk.
+
+    self.cfg is live: the channel widgets write into it as they are
+    touched, long before anyone presses Save. So any other action that
+    writes the whole of it commits a mapping that was only being tried
+    out - possibly an arm channel - because the user did something
+    unrelated in another tab. Picking a layout file in the Module prep
+    tab did exactly that.
+
+    Checked by reading app.py rather than by calling anything, because
+    calling it would write over the real config.json sitting next to this
+    file - load() and save() bind their default path at import.
+    """
+    import ast
+
+    print("")
+    print("-- configuration writes --")
+    ALLOWED = {"save_config", "import_config_file"}
+
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "app.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    def writes_live_cfg(node):
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            f = call.func
+            if not (isinstance(f, ast.Attribute) and f.attr == "save"
+                    and isinstance(f.value, ast.Name)
+                    and f.value.id == "configmod"):
+                continue
+            for arg in call.args:
+                if (isinstance(arg, ast.Attribute) and arg.attr == "cfg"
+                        and isinstance(arg.value, ast.Name)
+                        and arg.value.id == "self"):
+                    return True
+        return False
+
+    offenders = []
+    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+        for fn in cls.body:
+            if isinstance(fn, ast.FunctionDef) and writes_live_cfg(fn):
+                if fn.name not in ALLOWED:
+                    offenders.append(f"{fn.name} (line {fn.lineno})")
+                else:
+                    print(f"   {fn.name}: allowed, it is the explicit action")
+    assert not offenders, (
+        "these write the live self.cfg and should re-read from disk and "
+        f"patch one key instead: {', '.join(offenders)}")
+    print(f"   nothing else writes the live configuration")
+
+
 def _check_map():
     """The moving map: its projection, and what it refuses to plot."""
     import mapview as mv
 
     print("")
     print("-- map --")
+
+    # tkinter is imported here, not at the top, and the root is built
+    # before the try. This file promises a bench test with no hardware,
+    # and it was true of a display too until the map arrived: on a
+    # headless machine tk.Tk() raises and would take the whole run down
+    # with it, including the failsafe checks, which are the ones least
+    # worth skipping quietly.
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception as exc:
+        print(f"   skipped, no display: {exc}")
+        return
 
     # The projection has to be the real Web Mercator one, or the aircraft
     # sits over the wrong piece of ground - which is worse than no map,
@@ -521,7 +587,6 @@ def _check_map():
     print(f"   1 deg north {d/1000:.1f} km bearing {b:.0f}, "
           f"1 deg east {d2/1000:.1f} km bearing {b2:.0f}")
 
-    root = tk.Tk()
     root.withdraw()
     try:
         m = mv.MapView(root, theme.DARK,
@@ -564,6 +629,59 @@ def _check_map():
         assert m.origin == m.pos and not m.trail, (
             "Reset marker must recentre and clear the trail")
         print("   Reset marker recentres and clears the trail")
+
+        # Longitude is a circle cut at the antimeridian, and a plain
+        # average of two of them lands half a world from both. The
+        # distance was always right - haversine does not care - so the
+        # zoom stayed tight while the centre was wrong, and the map came
+        # up empty with everything projected billions of pixels away.
+        assert abs(mv.mid_lon(179.9, -179.9) - 180.0) < 1e-9 or \
+            abs(mv.mid_lon(179.9, -179.9) + 180.0) < 1e-9, \
+            f"the dateline midpoint came out {mv.mid_lon(179.9, -179.9)}"
+        assert abs(mv.mid_lon(10.0, 20.0) - 15.0) < 1e-9, "ordinary case moved"
+        assert abs(mv.wrap_lon(-179.9, 179.9) - 180.1) < 1e-9, \
+            "wrap_lon must carry a point past the cut, not back around it"
+
+        m.tiles.enabled = False
+        m.origin = (17.0, 179.9)
+        m.pos = (17.0, -179.9)
+        m.trail.clear()
+        m.trail.append(m.pos)
+        m.draw()
+        w, h = m._size()
+        placed = [m.canvas.coords(i) for i in m.canvas.find_all()
+                  if m.canvas.type(i) == "polygon"]
+        assert placed, "the aircraft was not drawn at all across the dateline"
+        xs = placed[0][0::2]
+        assert all(-w < x < 2 * w for x in xs), (
+            f"the aircraft landed at x={xs[:2]} on a {w}px canvas")
+        d, _b = mv.distance_bearing(*m.origin, *m.pos)
+        print(f"   across the antimeridian: {d/1000:.1f} km apart, "
+              f"aircraft drawn at x={xs[0]:.0f} on a {w}px canvas")
+
+        # An unbounded tile cache is a leak in a program left open for a
+        # day of flying: every new zoom and position adds images nothing
+        # ever removes.
+        store = mv.TileStore(os.path.join(tempfile.gettempdir(), "mavjoy_lru"))
+        for i in range(mv.MAX_TILES_IN_MEMORY + 40):
+            store._remember((15, i, 0), f"tile{i}")
+        assert len(store.images) == mv.MAX_TILES_IN_MEMORY, (
+            f"the cache held {len(store.images)} tiles, cap is "
+            f"{mv.MAX_TILES_IN_MEMORY}")
+        assert (15, 0, 0) not in store.images, "the oldest tile should have gone"
+        assert (15, mv.MAX_TILES_IN_MEMORY + 39, 0) in store.images, \
+            "the newest tile should have stayed"
+        print(f"   tile cache capped at {mv.MAX_TILES_IN_MEMORY}, oldest evicted")
+
+        # forget_failures must forget only the failures. Clearing _asked
+        # as well re-queued tiles that were still in flight.
+        store._failed.add((15, 1, 1))
+        store._asked.update({(15, 1, 1), (15, 2, 2)})
+        store.forget_failures()
+        assert store._failed == set(), "failures should be forgotten"
+        assert store._asked == {(15, 2, 2)}, (
+            f"only the failed tile should be re-askable, got {store._asked}")
+        print("   forget_failures drops the failures and keeps the pending")
     finally:
         root.destroy()
 
@@ -579,6 +697,18 @@ def _check_module_prep():
 
     print("")
     print("-- module prep --")
+
+    # Skipped rather than fatal when the flashing tools are absent.
+    # They are needed only by the Module prep tab, and a machine set up
+    # from requirements.txt alone would otherwise abort the whole run
+    # here - before the failsafe checks below it.
+    try:
+        import esptool  # noqa: F401
+        from littlefs import LittleFS  # noqa: F401
+    except ImportError as exc:
+        print(f"   skipped: {exc}")
+        print("   install with: pip install esptool littlefs-python")
+        return
 
     stock = {
         "serial_rx": 13, "serial_tx": 13,
@@ -1250,6 +1380,7 @@ def _run(wire):
     _check_latch_memory()
     _check_throttle_cut()
     _check_guarded_reset()
+    _check_config_writes()
     _check_map()
     _check_module_prep()
     _check_hold_snapshot()
