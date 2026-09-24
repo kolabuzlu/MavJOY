@@ -9,6 +9,7 @@ URL handler, which exercises the same pyserial read/write paths."""
 import os
 import json
 import socket
+import struct
 import tempfile
 import sys
 import threading
@@ -52,6 +53,10 @@ class _PtyWire(_Wire):
     def inject(self, data):
         os.write(self._master, data)
 
+    def pull(self):
+        """The module going away: the far end of the pty is simply gone."""
+        os.close(self._master)
+
 
 class _SocketWire(_Wire):
     """TCP loopback. The link connects as a client via socket://host:port."""
@@ -88,6 +93,18 @@ class _SocketWire(_Wire):
 
     def inject(self, data):
         self._conn.sendall(data)
+
+    def pull(self):
+        """The module going away mid-stream, as a USB lead coming out does.
+
+        Reset rather than a polite close: a lead pulled from a module sends
+        no goodbye, and the link's next write should fail as it would on a
+        COM port that has just disappeared.
+        """
+        linger = struct.pack("hh" if sys.platform == "win32" else "ii", 1, 0)
+        self._conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        self._conn.close()
+        self._srv.close()
 
     def close(self):
         for s in (self._conn, self._srv):
@@ -209,6 +226,73 @@ def _check_rf_hold(wire, lk, mixer):
     print(f"   pilot moves it:              CH6 = {released[5]} (released)")
     assert released[5] != centred, "the channel never released"
     assert 6 not in mixer.holding(), "CH6 should have released once moved"
+
+
+def _check_module_lost():
+    """Pulling the TX module's USB lead must end the link, and say why.
+
+    The module cannot report its own disappearance, so MavJOY has to notice
+    from its side: the next frame will not go. The link must end there -
+    not retry into a port that is gone, not carry on looking as if it were
+    transmitting - and say so, because the model is now in its own failsafe
+    and nothing moved on the sticks will reach it.
+
+    The real link thread, against a fake module of its own that is pulled
+    away while frames are flowing. Its own, because pulling it ends the
+    link that talks to it.
+    """
+    print("\n-- TX module unplugged --")
+    wire, _needs_url = _open_wire()
+    cfg = configmod.default_config()
+    cfg["channels"][0] = {"src": "axis", "idx": 0, "inv": False}
+    mixer = gp.Mixer(cfg)
+    mixer.reset()
+    events = []
+    lk = linkmod.CrsfLink(
+        wire.port, 400000, 250, mixer, _FakePad(),
+        on_event=lambda lvl, m: events.append((time.monotonic(), lvl, m)))
+    lk.start()
+    try:
+        if hasattr(wire, "wait"):
+            wire.wait()
+        flowing = b""
+        t_end = time.time() + 1.0
+        while time.time() < t_end:
+            flowing += wire.read()
+            time.sleep(0.005)
+        assert lk.transmitting and len(flowing) > 1000, \
+            "frames were not reaching the module before it was pulled"
+        print(f"   plugged in:  transmitting, {len(flowing)} bytes in 1.0 s")
+
+        sent = lk.stats.frames_sent
+        t0 = time.monotonic()
+        wire.pull()
+        # The thread outlives the decision by a moment: pyserial's socket://
+        # close sleeps 0.3 s on the way out, which a COM port does not. So
+        # the time that matters is when the failure was reported, below.
+        lk.join(timeout=2.0)
+
+        assert not lk.is_alive(), "the link kept running into a port that is gone"
+        assert not lk.running, "the link still claims the port is open"
+        assert not lk.transmitting, "the link still claims to be transmitting"
+        _t, stats = lk.snapshot()
+        assert stats.write_errors >= 1, "the failed write was not counted"
+        failed = [(t, m) for t, lvl, m in events
+                  if lvl == "error" and m.startswith("Serial write failed")]
+        assert failed, f"the link ended without saying why: {events}"
+        t_failed, said = failed[0]
+        assert t_failed - t0 < 0.5, (
+            f"the link took {t_failed - t0:.2f} s to notice the module had gone")
+        assert events[-1][1:] == ("info", "Link closed"), \
+            f"the link did not close the port on its way out: {events}"
+        print(f"   pulled:      the next frame failed {(t_failed - t0) * 1000:.0f}"
+              f" ms later; {stats.frames_sent - sent} frames got out after the pull")
+        print(f"   it said:     [error] {said}")
+        print(f"   and:         [info] {events[-1][2]}")
+    finally:
+        lk.stop()
+        lk.join(timeout=2.0)
+        wire.close()
 
 
 def _check_oneway():
@@ -1332,6 +1416,11 @@ def _check_guard_button():
 
 
 def main():
+    # Windows reports errors in the user's language, and a redirected
+    # stdout may not be able to encode them. A test must not fail over
+    # printing what it found.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     wire, needs_url = _open_wire()
     print(f"virtual serial port: {wire.port}")
 
@@ -1531,6 +1620,7 @@ def _run(wire):
     pad2.stop()
 
     _check_rf_hold(wire, lk, mixer)
+    _check_module_lost()
     _check_oneway()
     _check_arm_is_ch5()
     _check_arm_from_model()
