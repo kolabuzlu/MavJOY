@@ -1,13 +1,17 @@
-"""Prepare a BetaFPV 1W Micro TX to take CRSF over its own USB port.
+"""Prepare an ExpressLRS TX module to take CRSF over its own USB port.
 
-A stock module expects CRSF on GPIO 13, the module-bay pin a handset feeds,
-and keeps GPIO 3 and 1 - UART0, the USB bridge - for the ESP8285 backpack.
-That is no use to a PC program: talking to it would need a USB-TTL adapter
-soldered to the bay pin. Moving CRSF onto UART0 makes the module's own USB
-socket the CRSF port, so MavJOY can open it like any serial device.
+A stock module expects CRSF on its module-bay pin, the one a handset feeds:
+GPIO 13 on the BetaFPV 1W Micro, GPIO 4 on the RadioMaster Nomad. That is
+no use to a PC program: talking to it would need a USB-TTL adapter soldered
+to the bay pin. Moving CRSF onto GPIO 3 and 1 - UART0, the USB bridge -
+makes the module's own USB socket the CRSF port, so MavJOY can open it like
+any serial device.
 
-There is only one UART0, so this is a trade rather than a free win: the
-backpack, and with it the module's WiFi, goes away. Restore puts it back.
+What that costs depends on where the backpack is wired. The BetaFPV keeps
+its ESP8285 backpack on GPIO 3 and 1 too, and there is only one UART0, so
+the backpack and its WiFi go. The Nomad's backpack has pins of its own,
+GPIO 18 and 5, and ExpressLRS runs it on another UART, so it stays.
+Restore puts either module back as it came.
 
 Nothing here rebuilds firmware. ExpressLRS reads /hardware.json from its
 LittleFS partition at boot and only falls back to the layout compiled into
@@ -30,16 +34,23 @@ import os
 import struct
 import tempfile
 
-# What preparing actually changes. Everything else in the layout is the
+# What preparing always changes. Everything else in the layout is the
 # module's own wiring - radio pins, screen, fan, power table - and is
 # carried across untouched, because hardware.json REPLACES the built-in
 # layout rather than merging over it. A partial file would leave the
 # module with no radio.
-PREPARE_SETS = {
+CRSF_SETS = {
     "serial_rx": 3,        # UART0 RX, the USB bridge
     "serial_tx": 1,        # UART0 TX
-    "use_backpack": False,  # both want UART0; CRSF wins
 }
+
+# What it changes as well when the backpack's port sits on those same pins.
+# Turning the flag off is not enough there: ExpressLRS opens a port on the
+# debug_backpack pins whenever they are set, whatever use_backpack says
+# (setupSerial in tx_main.cpp), and that port and CRSF cannot share GPIO 3
+# and 1. So the pins go too. A backpack on pins of its own is left alone.
+BACKPACK_OFF_SETS = {"use_backpack": False}   # both want UART0; CRSF wins
+BACKPACK_PINS = ("debug_backpack_rx", "debug_backpack_tx")
 PREPARE_DROPS = ("debug_backpack_baud", "debug_backpack_rx", "debug_backpack_tx")
 
 # Fields a real ELRS TX layout always carries. Checked before writing so
@@ -342,8 +353,8 @@ def find_filesystem(port, log, progress=None):
 
     if not entries:
         raise PrepError("Could not read a partition table from the module. "
-                        "Check the port, and that the DIP switches route USB "
-                        "to the ESP32.")
+                        "Check the port, and on a module with DIP switches, "
+                        "that they route USB to the ESP32.")
 
     log("")
     log("Partition table:")
@@ -362,8 +373,8 @@ def find_filesystem(port, log, progress=None):
                     "cannot be overridden this way.")
 
 
-def resolve_layout(path):
-    """The stock layout with the CRSF-over-USB changes applied."""
+def read_layout(path):
+    """The stock layout in `path`, checked to be an ExpressLRS TX layout."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             layout = json.load(fh)
@@ -380,12 +391,72 @@ def resolve_layout(path):
             f"This does not look like an ExpressLRS TX layout - it has no "
             f"{', '.join(missing)}. Download the one for your module from "
             f"{LAYOUT_URL}.")
-
-    layout = dict(layout)
-    layout.update(PREPARE_SETS)
-    for key in PREPARE_DROPS:
-        layout.pop(key, None)
     return layout
+
+
+def backpack_pins(layout):
+    """The GPIOs the layout gives the backpack's port: none, one or two."""
+    return {layout.get(key) for key in BACKPACK_PINS} - {None}
+
+
+def backpack_clashes(layout):
+    """Whether the backpack's port sits on the pins CRSF is moving to.
+
+    Asked whatever use_backpack says. Several stock layouts keep a logging
+    port on GPIO 3 and 1 with the flag off, and the firmware opens that
+    port all the same.
+    """
+    return bool(backpack_pins(layout) & set(CRSF_SETS.values()))
+
+
+def plan_layout(stock):
+    """What preparing writes for this stock layout, and the changes made.
+
+    Returns (layout, sets, drops). The changes come back as well because
+    the read-back is checked against them - see check_read_back.
+    """
+    sets = dict(CRSF_SETS)
+    drops = ()
+    if backpack_clashes(stock):
+        sets.update(BACKPACK_OFF_SETS)
+        drops = PREPARE_DROPS
+    layout = dict(stock)
+    layout.update(sets)
+    for key in drops:
+        layout.pop(key, None)
+    return layout, sets, drops
+
+
+def resolve_layout(path):
+    """The stock layout with the CRSF-over-USB changes applied."""
+    return plan_layout(read_layout(path))[0]
+
+
+def backpack_note(stock):
+    """One sentence on what preparing does to this module's backpack."""
+    pins = " and ".join(str(p) for p in sorted(backpack_pins(stock)))
+    if backpack_clashes(stock):
+        if stock.get("use_backpack"):
+            return (f"Its backpack shares GPIO {pins} with the USB port, so "
+                    f"the backpack and its WiFi are switched off.")
+        return (f"Its backpack port shares GPIO {pins} with the USB port, "
+                f"so that port is removed. The backpack was off already.")
+    if stock.get("use_backpack") and pins:
+        return f"Its backpack has pins of its own, GPIO {pins}, so it stays on."
+    return "Its backpack is not on the USB port's pins, so it is left as it is."
+
+
+def check_read_back(got, sets, drops):
+    """What the module holds that preparing did not ask for, as {key: value}.
+
+    Checked against the changes rather than against the numbers written out
+    again. Two copies of 3 and 1 is two places to change, and the one that
+    gets missed is this one - which would then either call every good flash
+    a failure or wave a bad one through. Empty means the flash took.
+    """
+    wrong = {k: got.get(k) for k, v in sets.items() if got.get(k) != v}
+    wrong.update({k: got[k] for k in drops if k in got})
+    return wrong
 
 
 def build_image(layout, size):
@@ -439,10 +510,12 @@ def read_back(port, offset, size, log, progress=None):
 
 def prepare(port, layout_path, log, progress=None):
     """Write the CRSF-over-USB layout, then read it back and check it."""
-    layout = resolve_layout(layout_path)
+    stock = read_layout(layout_path)
+    layout, sets, drops = plan_layout(stock)
     log(f"Layout: {os.path.basename(layout_path)}")
     log(f"   serial_rx {layout['serial_rx']}, serial_tx {layout['serial_tx']}, "
-        f"use_backpack {layout['use_backpack']}")
+        f"use_backpack {layout.get('use_backpack', False)}")
+    log(f"   {backpack_note(stock)}")
     log("")
 
     offset, size = find_filesystem(port, log, progress)
@@ -468,17 +541,14 @@ def prepare(port, layout_path, log, progress=None):
                         "The module will reformat anything it cannot mount "
                         "and use its built-in layout, so it is not harmed - "
                         "but the change has not taken. Try Restore.")
-    # Checked against PREPARE_SETS rather than against the numbers written
-    # out again. Two copies of 3 and 1 is two places to change, and the one
-    # that gets missed is this one - which would then either call every
-    # good flash a failure or wave a bad one through.
-    wrong = {k: got.get(k) for k, v in PREPARE_SETS.items() if got.get(k) != v}
+    wrong = check_read_back(got, sets, drops)
     if wrong:
         raise PrepError(f"The layout read back does not match what was "
                         f"written ({wrong}). Try Restore and report this.")
 
     log("")
-    log("Confirmed on the module: CRSF is on GPIO 3/1, backpack off.")
+    log("Confirmed on the module: CRSF is on GPIO 3/1, "
+        + ("backpack off." if drops else "backpack untouched."))
     log("Power-cycle the module, then open its port in the Link tab.")
     log("ExpressLRS accepts only certain bauds - 921600 is a good one.")
     return got

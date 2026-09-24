@@ -828,6 +828,30 @@ def _check_module_prep():
         assert out[key] == stock[key], f"{key} must be carried across"
     print("   radio, screen, fan and power table carried across untouched")
 
+    # A backpack on pins of its own - the RadioMaster Nomad's, GPIO 18 and
+    # 5 - is left alone. ExpressLRS runs it on another UART, so switching it
+    # off would cost the backpack for nothing.
+    nomad = dict(stock, serial_rx=4, serial_tx=4,
+                 debug_backpack_rx=18, debug_backpack_tx=5)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(nomad, fh)
+    kept = mp.resolve_layout(path)
+    assert kept["serial_rx"] == 3 and kept["serial_tx"] == 1, \
+        "CRSF must move onto UART0 on the Nomad too"
+    assert kept["use_backpack"] is True, "the Nomad's backpack must stay on"
+    for key in mp.PREPARE_DROPS:
+        assert kept[key] == nomad[key], f"the Nomad's {key} must be kept"
+    print("   a backpack on pins of its own stays on, its pins and baud kept")
+
+    # A port on GPIO 3 and 1 with the flag already off still has to go: the
+    # firmware opens it whatever use_backpack says.
+    quiet = {k: v for k, v in stock.items() if k != "use_backpack"}
+    cleared = mp.plan_layout(quiet)[0]
+    assert cleared["use_backpack"] is False, "the flag must end up off"
+    for key in mp.PREPARE_DROPS:
+        assert key not in cleared, f"{key} on UART0 must go with the flag off"
+    print("   a backpack port on UART0 goes even with the flag already off")
+
     # A layout with no radio pins is not a layout, and saying so here is
     # much cheaper than finding out after it is on the module.
     for body, why in (({"hello": 1}, "not a layout"),
@@ -861,6 +885,47 @@ def _check_module_prep():
         back = json.loads(fh.read().decode("utf-8"))
     assert back == out, "the layout must survive the filesystem image"
     print(f"   {len(image)} byte image mounts and reads back identical")
+
+    # The file written is the stock one with exactly these changes: each
+    # set in turn, then each drop. Byte for byte, key order included,
+    # because the BetaFPV's is the file the module was proven with.
+    def by_hand(layout, sets, drops):
+        layout = dict(layout)
+        for key, value in sets:
+            layout[key] = value
+        for key in drops:
+            layout.pop(key, None)
+        return json.dumps(layout, separators=(",", ":")).encode()
+
+    def payload_for(layout):
+        return mp.build_image(mp.plan_layout(layout)[0], size)[1]
+
+    crsf_sets = [("serial_rx", 3), ("serial_tx", 1)]
+    assert payload_for(stock) == by_hand(
+        stock, crsf_sets + [("use_backpack", False)], mp.PREPARE_DROPS), \
+        "the BetaFPV must get exactly the file it got before"
+    assert payload_for(nomad) == by_hand(nomad, crsf_sets, ()), \
+        "the Nomad must get CRSF moved and nothing else"
+    print("   BetaFPV and Nomad files byte for byte as intended")
+
+    # The read-back is checked against what THIS layout's preparing asked
+    # for. Holding a Nomad to the BetaFPV's changes would call every good
+    # flash of it a failure.
+    for name, layout in (("BetaFPV", stock), ("Nomad", nomad)):
+        made, sets, drops = mp.plan_layout(layout)
+        assert mp.check_read_back(made, sets, drops) == {}, \
+            f"a good {name} flash must pass"
+        assert mp.check_read_back(dict(made, serial_rx=13), sets, drops) \
+            == {"serial_rx": 13}, f"a {name} flash left on the bay pin must fail"
+    made, sets, drops = mp.plan_layout(stock)
+    assert mp.check_read_back(dict(made, use_backpack=True), sets, drops) \
+        == {"use_backpack": True}, "a BetaFPV backpack left on must fail"
+    assert mp.check_read_back(dict(made, debug_backpack_rx=3), sets, drops) \
+        == {"debug_backpack_rx": 3}, "a BetaFPV backpack pin left must fail"
+    assert "switched off" in mp.backpack_note(stock)
+    assert "stays on" in mp.backpack_note(nomad)
+    assert "5 and 18" in mp.backpack_note(nomad)
+    print("   read-back passes a good flash of either and fails a bad one")
 
     # esptool's progress meter redraws one line with a carriage return. It
     # was reaching the log twice over: once per redraw, and once more at

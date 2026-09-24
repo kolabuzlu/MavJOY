@@ -1049,11 +1049,15 @@ class App(tk.Tk):
                 "can talk to it with no adapter soldered to the module bay. "
                 "It writes one small file to the module's filesystem and "
                 "leaves the firmware alone.\n\n"
-                "Preparing switches the backpack off, and with it the "
-                "module's WiFi — CRSF and the backpack both want UART0 and "
-                "there is only one. Restore puts the module back as it came.\n\n"
-                "Before either: set the DIP switches so USB reaches the ESP32, "
-                "stop the link, and close anything else holding the port."),
+                "Where the backpack is wired to the USB port's pins, as on "
+                "the BetaFPV 1W Micro, preparing switches it off, and its "
+                "WiFi with it — CRSF and the backpack both want UART0 and "
+                "there is only one. Where it has pins of its own, as on the "
+                "RadioMaster Nomad, it stays on. Restore puts the module "
+                "back as it came.\n\n"
+                "Before either: if the module has DIP switches, set them so "
+                "USB reaches the ESP32. Stop the link, and close anything "
+                "else holding the port."),
         ).pack(anchor="w", pady=(0, 12))
 
         row = ttk.Frame(frm)
@@ -1199,11 +1203,17 @@ class App(tk.Tk):
                     "ExpressLRS targets repository, in the TX folder, and its "
                     "name has to match your module.")
                 return
+            # Read here as well as in the worker so that the question can
+            # say what happens to this module's backpack, not every one's.
+            try:
+                note = module_prep.backpack_note(module_prep.read_layout(path))
+            except module_prep.PrepError as exc:
+                messagebox.showerror("Not a layout file", str(exc))
+                return
             ok = messagebox.askokcancel(
                 "Prepare the module",
                 f"Write a new pin layout to the module on {port}?\n\n"
-                f"CRSF moves onto the USB port, and the backpack — with the "
-                f"module's WiFi — is switched off.\n\n"
+                f"CRSF moves onto the USB port. {note}\n\n"
                 f"Restore undoes this completely.")
         else:
             ok = messagebox.askokcancel(
