@@ -33,6 +33,7 @@ import json
 import os
 import struct
 import tempfile
+import time
 
 # What preparing always changes. Everything else in the layout is the
 # module's own wiring - radio pins, screen, fan, power table - and is
@@ -74,6 +75,16 @@ LFS_NAME_MAX = 32
 LFS_DISK_VERSION = 0x00020000
 
 LAYOUT_URL = "https://github.com/ExpressLRS/targets/tree/master/TX"
+
+# How esptool says a read arrived damaged. The stub checksums every block
+# it sends and the digest of the whole read, so a garbled read is caught
+# rather than used - and a read changes nothing on the module, so it can
+# simply be asked again. On a RadioMaster Nomad at 115200 this failed two
+# Prepares out of four, every time in a read.
+_READ_GLITCHES = ("Corrupt data", "Read more than expected", "Expected digest",
+                  "Digest mismatch", "Invalid head of packet")
+READ_ATTEMPTS = 4
+READ_RETRY_PAUSE = 0.5
 
 
 class PrepError(Exception):
@@ -328,6 +339,28 @@ def _esptool(port, *args, log, progress=None):
         undo_logger()
 
 
+def _read_flash(port, offset, size, path, log, progress=None):
+    """esptool read_flash, asked again when the data arrives garbled.
+
+    Reads only. A write or an erase that fails is reported, never repeated:
+    repeating one is a decision about the module, not about the wire. And
+    a read that fails for any other reason - no module, the wrong port - is
+    reported at once, because asking again would only make the wait longer.
+    """
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        try:
+            _esptool(port, "read_flash", hex(offset), hex(size), path,
+                     log=log, progress=progress)
+            return
+        except PrepError as exc:
+            if attempt == READ_ATTEMPTS or not any(g in str(exc) for g in _READ_GLITCHES):
+                raise
+            log(f"(the read arrived garbled on the USB serial link and "
+                f"esptool's check caught it; reading again, attempt "
+                f"{attempt + 1} of {READ_ATTEMPTS})")
+            time.sleep(READ_RETRY_PAUSE)
+
+
 def find_filesystem(port, log, progress=None):
     """Read the chip's partition table and locate its filesystem.
 
@@ -337,8 +370,7 @@ def find_filesystem(port, log, progress=None):
     """
     with tempfile.TemporaryDirectory() as tmp:
         blob = os.path.join(tmp, "ptable.bin")
-        _esptool(port, "read_flash", hex(PART_TABLE_OFFSET),
-                 hex(PART_TABLE_SIZE), blob, log=log, progress=progress)
+        _read_flash(port, PART_TABLE_OFFSET, PART_TABLE_SIZE, blob, log, progress)
         with open(blob, "rb") as fh:
             raw = fh.read()
 
@@ -488,8 +520,7 @@ def read_back(port, offset, size, log, progress=None):
         return None
     with tempfile.TemporaryDirectory() as tmp:
         blob = os.path.join(tmp, "fs.bin")
-        _esptool(port, "read_flash", hex(offset), hex(size), blob, log=log,
-                 progress=progress)
+        _read_flash(port, offset, size, blob, log, progress)
         with open(blob, "rb") as fh:
             raw = fh.read()
     fs = LittleFS(block_size=LFS_BLOCK_SIZE,

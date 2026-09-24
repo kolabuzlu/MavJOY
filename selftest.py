@@ -1011,6 +1011,101 @@ def _check_module_prep():
     assert "5 and 18" in mp.backpack_note(nomad)
     print("   read-back passes a good flash of either and fails a bad one")
 
+    # A read that arrives garbled is asked again; a write or an erase never
+    # is. esptool is replaced by a stand-in that garbles on cue, holding a
+    # partition table and whatever was last written, so the real prepare()
+    # and restore() run end to end.
+    glitch = "FatalError: Corrupt data, expected 0x1000 bytes but received 0x10 bytes."
+    rows = [(0x01, 0x02, 0x9000, 0x5000, b"nvs"),
+            (0x00, 0x10, 0x10000, 0x1E0000, b"app0"),
+            (0x01, 0x82, 0x3D0000, 0x20000, b"spiffs")]
+    table = b"".join(b"\xaa\x50" + struct.pack("<BBII", t, s, o, n)
+                     + label.ljust(16, b"\0") + b"\0" * 4 for t, s, o, n, label in rows)
+    table += b"\xff" * (mp.PART_TABLE_SIZE - len(table))
+    calls, flash, fail = [], {}, {"read_flash": [], "write_flash": [], "erase_region": []}
+
+    def fake_esptool(port, *args, log, progress=None):
+        op = args[0]
+        calls.append(op)
+        err = fail[op].pop(0) if fail[op] else None
+        if err:                                   # None in the queue: this one works
+            raise mp.PrepError(err)
+        if op == "read_flash":
+            off, n = int(args[1], 16), int(args[2], 16)
+            with open(args[3], "wb") as fh:
+                fh.write(table if off == mp.PART_TABLE_OFFSET
+                         else flash.get(off, b"\xff" * n))
+        elif op == "write_flash":
+            with open(args[2], "rb") as fh:
+                flash[int(args[1], 16)] = fh.read()
+        else:
+            flash.pop(int(args[1], 16), None)
+
+    real_esptool, real_pause = mp._esptool, getattr(mp, "READ_RETRY_PAUSE", 0)
+    mp._esptool, mp.READ_RETRY_PAUSE = fake_esptool, 0
+    layout_file = os.path.join(tempfile.gettempdir(), "mavjoy_nomad_test.json")
+    with open(layout_file, "w", encoding="utf-8") as fh:
+        json.dump(nomad, fh)
+    said = []
+    try:
+        # two garbled reads of the partition table, one of the read-back
+        fail["read_flash"] = [glitch, glitch, None, glitch]
+        try:
+            got = mp.prepare("COM0", layout_file, said.append)
+        except mp.PrepError as exc:
+            raise AssertionError(f"a garbled read must be asked again, got: {exc}")
+        assert calls == ["read_flash"] * 3 + ["write_flash"] + ["read_flash"] * 2, calls
+        assert flash[0x3D0000] == mp.build_image(mp.plan_layout(nomad)[0], 0x20000)[0], \
+            "the image written must be exactly the one planned"
+        assert got["serial_rx"] == 3 and got["use_backpack"] is True
+        assert sum("reading again" in s for s in said) == 3, said
+        print("   garbled reads asked again: 3 retries, 1 write, prepared")
+
+        # a write is never repeated, whatever it failed with
+        calls.clear()
+        fail["write_flash"] = [glitch]
+        try:
+            mp.prepare("COM0", layout_file, said.append)
+            raise AssertionError("a failed write must be reported")
+        except mp.PrepError:
+            pass
+        assert calls.count("write_flash") == 1, calls
+        # ... and neither is an erase
+        calls.clear()
+        fail["read_flash"], fail["erase_region"] = [glitch], [glitch]
+        try:
+            mp.restore("COM0", said.append)
+            raise AssertionError("a failed erase must be reported")
+        except mp.PrepError:
+            pass
+        assert calls == ["read_flash", "read_flash", "erase_region"], calls
+        print("   a failed write or erase is reported, never repeated")
+
+        # garbled every time: give up after READ_ATTEMPTS, with esptool's words
+        calls.clear()
+        fail["read_flash"] = [glitch] * mp.READ_ATTEMPTS
+        try:
+            mp.find_filesystem("COM0", said.append)
+            raise AssertionError("a read garbled every time must give up")
+        except mp.PrepError as exc:
+            assert "Corrupt data" in str(exc)
+        assert calls == ["read_flash"] * mp.READ_ATTEMPTS, calls
+        # no module there at all is not a glitch: said once, not four times
+        calls.clear()
+        fail["read_flash"] = ["FatalError: Failed to connect to ESP32: "
+                              "No serial data received."]
+        try:
+            mp.find_filesystem("COM0", said.append)
+            raise AssertionError("a failed connect must be reported")
+        except mp.PrepError:
+            pass
+        assert calls == ["read_flash"], calls
+        print(f"   gives up after {mp.READ_ATTEMPTS} garbled reads; a failed "
+              f"connect is not retried")
+    finally:
+        mp._esptool, mp.READ_RETRY_PAUSE = real_esptool, real_pause
+        os.unlink(layout_file)
+
     # esptool's progress meter redraws one line with a carriage return. It
     # was reaching the log twice over: once per redraw, and once more at
     # the end, because flush did not filter what write did.
