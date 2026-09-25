@@ -1723,7 +1723,11 @@ class App(tk.Tk):
     def _apply_auto_rate(self):
         """Follow the frame interval the module broadcasts in its sync frames."""
         if not (self.link and self.link.running):
-            self._rate_probed_for = None     # read again on the next link
+            # Read again on the next link. A link that stops mid-read never
+            # answers the job it was on, so free the read here as well, or
+            # it stays busy and no later link reads the rate at all.
+            self._rate_probed_for = None
+            self._rate_probe_busy = False
             return
         requested = self.link.requested_rate()
         if requested is None:
