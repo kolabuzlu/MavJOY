@@ -66,6 +66,10 @@ FETCH_TIMEOUT = 6.0
 # than on the edge.
 RING_STEPS = (50, 100, 250, 500, 1000, 2000, 5000, 10000, 20000)
 
+# What the worker hands back for a request it dropped because the tile had
+# left the view before its turn came.
+_SKIPPED = object()
+
 
 def deg2px(lat, lon, zoom):
     """Longitude and latitude to Web Mercator pixels at `zoom`."""
@@ -130,7 +134,15 @@ class TileStore:
         self.images = {}             # (z,x,y) -> PhotoImage
         self._failed = set()
         self._asked = set()
-        self._queue = queue.Queue()
+        # Newest first, and only what is still on screen. In flight the view
+        # moves and the zoom changes faster than one worker can fetch, so
+        # requests pile up. First come, first served then spends the whole
+        # flight on tiles the view has already left, while the ones it
+        # shows wait behind them: one INAV SITL flight saved 885 tiles and
+        # put almost none of them on screen.
+        self._queue = queue.LifoQueue()
+        self._wanted = frozenset()
+        self._lock = threading.Lock()
         self._done = queue.Queue()
         self._worker = None
         self.enabled = True
@@ -145,30 +157,47 @@ class TileStore:
                                             name="map-tiles")
             self._worker.start()
 
+    def set_wanted(self, keys):
+        """The tiles the view shows now. A queued request for any other
+        is dropped when its turn comes, rather than fetched."""
+        with self._lock:
+            self._wanted = frozenset(keys)
+
     def _run(self):
-        import urllib.request
         self._prune_disk()
         while True:
             try:
                 key = self._queue.get(timeout=30)
             except queue.Empty:
                 return
-            z, x, y = key
-            try:
-                req = urllib.request.Request(
-                    TILE_URL.format(z=z, x=x, y=y),
-                    headers={"User-Agent": USER_AGENT})
-                with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
-                    blob = r.read()
-                path = self._path(z, x, y)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                tmp = path + ".part"
-                with open(tmp, "wb") as fh:
-                    fh.write(blob)
-                os.replace(tmp, path)
-                self._done.put((key, blob, None))
-            except Exception as exc:
-                self._done.put((key, None, exc))
+            self._work(key)
+
+    def _work(self, key):
+        """Fetch one tile to disk, or drop it if the view has moved on."""
+        with self._lock:
+            wanted = key in self._wanted
+        if not wanted:
+            self._done.put((key, None, _SKIPPED))
+            return
+        z, x, y = key
+        try:
+            blob = self._fetch(z, x, y)
+            path = self._path(z, x, y)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".part"
+            with open(tmp, "wb") as fh:
+                fh.write(blob)
+            os.replace(tmp, path)
+            self._done.put((key, blob, None))
+        except Exception as exc:
+            self._done.put((key, None, exc))
+
+    def _fetch(self, z, x, y):
+        import urllib.request
+        req = urllib.request.Request(TILE_URL.format(z=z, x=x, y=y),
+                                     headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
+            return r.read()
 
     def _prune_disk(self):
         """Keep the tile folder under a size, oldest out first.
@@ -238,6 +267,11 @@ class TileStore:
         if self.enabled and key not in self._asked:
             self._asked.add(key)
             self._queue.put(key)
+        # Started whenever something is waiting, not only when this call
+        # queued it. The worker leaves after 30 s idle, and a tile queued in
+        # the instant it was leaving would otherwise wait for the next new
+        # tile - for good, if the view never moved.
+        if self.enabled and not self._queue.empty():
             self._start()
         return None
 
@@ -250,6 +284,9 @@ class TileStore:
                 key, blob, err = self._done.get_nowait()
             except queue.Empty:
                 return got
+            if err is _SKIPPED:
+                self._asked.discard(key)     # asked again if it comes back into view
+                continue
             if blob is None:
                 self._failed.add(key)
                 if self.online is None:
@@ -350,6 +387,8 @@ class MapView(ttk.Frame):
         self.tiles.enabled = self.show_tiles.get()
         if self.tiles.enabled:
             self.tiles.forget_failures()
+        else:
+            self.tiles.set_wanted(())     # drop what is queued: nothing will show it
         self.draw()
 
     def update_position(self, gps):
@@ -493,7 +532,17 @@ class MapView(ttk.Frame):
         # behind them, and that is either a dark empty canvas or a light
         # street map. Palette colours are picked for the first and vanish
         # on the second, so the ink follows whichever actually got drawn.
-        painted = self._draw_tiles(c, ox, oy) if self.show_tiles.get() else 0
+        # No tiles until the marker is set, which waits for a fix good enough
+        # to measure from. Before that a receiver - or a simulator still
+        # starting up - can report positions tens of kilometres apart from
+        # one frame to the next. The map followed them, and asking for a
+        # fresh screenful at every jump buried the tiles the flight needed
+        # later: one INAV SITL session spent six minutes like that and
+        # downloaded 858 tiles of open sea. The aircraft is drawn as ever.
+        want_tiles = self.show_tiles.get() and self.origin is not None
+        if not want_tiles:
+            self.tiles.set_wanted(())
+        painted = self._draw_tiles(c, ox, oy) if want_tiles else 0
         self._ink = "#16161c" if painted else self.pal["text"]
         self._ink_soft = "#45454f" if painted else self.pal["muted"]
 
@@ -533,17 +582,19 @@ class MapView(ttk.Frame):
         w, h = self._size()
         x1 = int((ox + w) // TILE_SIZE)
         y1 = int((oy + h) // TILE_SIZE)
-        for tx in range(x0, x1 + 1):
-            for ty in range(y0, y1 + 1):
-                if not (0 <= tx < n and 0 <= ty < n):
-                    continue
-                img = self.tiles.get(self._zoom, tx, ty)
-                if img is None:
-                    continue
-                c.create_image(tx * TILE_SIZE - ox, ty * TILE_SIZE - oy,
-                               image=img, anchor="nw")
-                self._images.append(img)
-                painted += 1
+        keys = [(self._zoom, tx, ty)
+                for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)
+                if 0 <= tx < n and 0 <= ty < n]
+        self.tiles.set_wanted(keys)
+        for key in keys:
+            img = self.tiles.get(*key)
+            if img is None:
+                continue
+            _z, tx, ty = key
+            c.create_image(tx * TILE_SIZE - ox, ty * TILE_SIZE - oy,
+                           image=img, anchor="nw")
+            self._images.append(img)
+            painted += 1
         return painted
 
     def _draw_rings(self, c, to_canvas, lat):

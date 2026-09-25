@@ -14,6 +14,7 @@ import tempfile
 import sys
 import threading
 import time
+import zlib
 
 import serial
 
@@ -858,6 +859,78 @@ def _check_map():
         assert store._asked == {(15, 2, 2)}, (
             f"only the failed tile should be re-askable, got {store._asked}")
         print("   forget_failures drops the failures and keeps the pending")
+
+        # In flight the view moves faster than tiles arrive. First come,
+        # first served spent a whole INAV SITL flight on tiles the view had
+        # already left and put none on screen. The newest request goes
+        # first, and one whose tile has left the view is dropped - and can
+        # be asked for again if it comes back. The worker is driven by hand.
+        def chunk(t, d):
+            return (struct.pack(">I", len(d)) + t + d
+                    + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF))
+        png = (b"\x89PNG\r\n\x1a\n"
+               + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(b"\x00\x80\x80\x80"))
+               + chunk(b"IEND", b""))
+        with tempfile.TemporaryDirectory() as tmp:
+            q = mv.TileStore(tmp)
+            fetched, started = [], []
+            q._fetch = lambda z, x, y: fetched.append((z, x, y)) or png
+            q._start = lambda: started.append(1)
+            a, b, c = (15, 1, 1), (15, 2, 2), (15, 3, 3)
+            q.set_wanted([a, b])
+            q.get(*a)
+            q.get(*b)
+            q.set_wanted([b, c])                 # the view moved: a left, c came
+            q.get(*c)
+            while not q._queue.empty():
+                q._work(q._queue.get_nowait())
+            q.drain()
+            assert fetched == [c, b], f"newest first, nothing off screen: {fetched}"
+            assert b in q.images and c in q.images, "fetched tiles must be kept"
+            assert a not in q._asked and a not in q._failed, \
+                "a dropped tile must be askable again, and not count as failed"
+            print("   newest tile first; one that left the view is dropped, "
+                  "not fetched")
+
+            # A tile queued in the instant the idle worker was leaving waited
+            # for the next new tile. Asking for it again must start a worker.
+            q.set_wanted([(15, 9, 9)])
+            q.get(15, 9, 9)
+            before = len(started)
+            q.get(15, 9, 9)                       # still pending
+            assert len(started) > before, "a waiting tile must get a worker"
+            print("   a tile left waiting gets a worker")
+
+        # No tiles before the marker. A GPS without a fix - a simulator
+        # starting up, here - reported positions tens of km apart every
+        # frame, and the map asked for a screenful at each one: 858 tiles
+        # of open sea downloaded, and the flight's own tiles buried behind
+        # the rest. The aircraft is still drawn from its first position.
+        with tempfile.TemporaryDirectory() as tmp:
+            t = mv.MapView(root, theme.DARK, tmp)
+            t.tiles._start = lambda: None
+            for i in range(10):
+                t.update_position({"lat": 35.6 + i * 0.2, "lon": 17.6 + i * 0.3,
+                                   "heading": 0, "sats": 3})
+            assert t.pos is not None, "the aircraft must still be drawn"
+            assert t.tiles._queue.empty() and not t.tiles._wanted, \
+                "no tile may be asked for before the marker is set"
+            t.update_position({"lat": 37.2577, "lon": 27.6402, "heading": 0,
+                               "sats": 12})
+            assert t.origin is not None and not t.tiles._queue.empty(), \
+                "tiles must be asked for once the marker is set"
+            print("   no tiles until the marker is set; then at once")
+
+            # And switching tiles off drops what is still queued.
+            t.show_tiles.set(False)
+            t._tiles_toggled()
+            skipped = []
+            t.tiles._fetch = lambda z, x, y: skipped.append((z, x, y)) or png
+            while not t.tiles._queue.empty():
+                t.tiles._work(t.tiles._queue.get_nowait())
+            assert not skipped, f"switched off, yet fetched {skipped}"
+            print("   switching tiles off drops the queued downloads")
     finally:
         root.destroy()
 
