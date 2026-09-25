@@ -1,4 +1,4 @@
-MavJOY 1.2.5
+MavJOY 1.2.6
 ============
 
 MavJOY turns a USB gamepad into an RC transmitter. It drives a real
