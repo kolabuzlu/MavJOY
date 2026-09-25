@@ -37,8 +37,8 @@ BAR_LEN = 150
 VERSION = configmod.VERSION
 
 
-def fmt_channel(value: int) -> str:
-    return f"{value:4d}  ({crsf.crsf_to_us(value):.0f}\u00b5s)"
+def fmt_channel(value: int, us: int) -> str:
+    return f"{value:4d}  ({us}\u00b5s)"
 
 
 def claim_taskbar_identity():
@@ -80,6 +80,11 @@ class App(tk.Tk):
         self._ports = []
         self._module_q = queue.Queue()      # settings replies, link thread -> GUI
         self._fields = {}                   # index -> ParamField from the module
+        # Reading the packet rate on its own: whether it is a Full one
+        # decides what the flight controller shows. See _probe_packet_rate.
+        self._rate_probe_busy = False
+        self._rate_probed_for = None        # the module rate it was read at
+        self._rate_probe_count = 0
         self._field_vars = {}               # index -> the tk var editing it
         self._cmd_index = None              # command currently running
         self._telem_last = ""               # last telemetry text drawn
@@ -386,6 +391,29 @@ class App(tk.Tk):
         fw_combo.bind("<<ComboboxSelected>>",
                       lambda _e: self.on_firmware_changed())
 
+        # How the receiver hands channels on, and the packet rate the module
+        # reported: with the firmware, these decide the microseconds the
+        # flight controller shows, which every figure here is made to match.
+        # Nothing sent to the model depends on either.
+        rx = ttk.Frame(status)
+        rx.pack(side="left", padx=(8, 0))
+        ttk.Label(rx, text="Receiver", foreground=self.pal["muted"]).pack(
+            anchor="w")
+        self.rx_output = tk.StringVar(
+            value=self.RX_OUTPUT_LABELS.get(
+                self.cfg.get("rx_output", crsf.DEFAULT_RX_OUTPUT),
+                self.RX_OUTPUT_LABELS[crsf.DEFAULT_RX_OUTPUT]))
+        rx_combo = ttk.Combobox(rx, textvariable=self.rx_output, width=8,
+                                state="readonly",
+                                values=list(self.RX_OUTPUT_LABELS.values()))
+        rx_combo.pack(anchor="w")
+        rx_combo.bind("<<ComboboxSelected>>",
+                      lambda _e: self.on_rx_output_changed())
+        self.rate_name_lbl = ttk.Label(rx, foreground=self.pal["muted"],
+                                       font=("TkDefaultFont", 7))
+        self.rate_name_lbl.pack(anchor="w")
+        self._show_packet_rate()
+
         thr_frame = ttk.Frame(status)
         thr_frame.pack(side="left", padx=16)
         ttk.Label(thr_frame, text="Throttle").pack(anchor="w")
@@ -435,9 +463,6 @@ class App(tk.Tk):
         self._build_prep_tab(nb)
 
     # ------------------------------------------------------------- outputs
-    OUT_MIN_US = crsf.US_MIN
-    OUT_MAX_US = crsf.US_MAX
-
     def _build_outputs_tab(self, nb):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Outputs")
@@ -484,22 +509,25 @@ class App(tk.Tk):
                       foreground=self.pal["muted"]).grid(
                 row=row, column=1, sticky="w", padx=(0, 10))
 
-            lo = tk.StringVar(value=str(ch.out_min))
-            lo_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
+            lo = tk.StringVar(value=str(self._shown(ch.lo_units, i)))
+            lo_spin = ttk.Spinbox(grid, from_=self._shown(crsf.CHANNEL_MIN, i),
+                                  to=self._shown(crsf.CHANNEL_MAX, i),
                                   increment=10, width=6, textvariable=lo,
                                   command=lambda n=i: self.on_output_changed(n))
             lo_spin.grid(row=row, column=2, sticky="w", padx=(0, 10))
             self._commit_on(lo_spin, lambda _e, n=i: self.on_output_changed(n))
 
-            mid = tk.StringVar(value=str(ch.out_mid))
-            mid_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
+            mid = tk.StringVar(value=str(self._shown(ch.mid_units, i)))
+            mid_spin = ttk.Spinbox(grid, from_=self._shown(crsf.CHANNEL_MIN, i),
+                                  to=self._shown(crsf.CHANNEL_MAX, i),
                                    increment=10, width=6, textvariable=mid,
                                    command=lambda n=i: self.on_output_changed(n))
             mid_spin.grid(row=row, column=3, sticky="w", padx=(0, 10))
             self._commit_on(mid_spin, lambda _e, n=i: self.on_output_changed(n))
 
-            hi = tk.StringVar(value=str(ch.out_max))
-            hi_spin = ttk.Spinbox(grid, from_=self.OUT_MIN_US, to=self.OUT_MAX_US,
+            hi = tk.StringVar(value=str(self._shown(ch.hi_units, i)))
+            hi_spin = ttk.Spinbox(grid, from_=self._shown(crsf.CHANNEL_MIN, i),
+                                  to=self._shown(crsf.CHANNEL_MAX, i),
                                   increment=10, width=6, textvariable=hi,
                                   command=lambda n=i: self.on_output_changed(n))
             hi_spin.grid(row=row, column=4, sticky="w", padx=(0, 10))
@@ -536,21 +564,33 @@ class App(tk.Tk):
             hi = int(float(w["hi"].get()))
         except (TypeError, ValueError):
             return                      # mid-typing; the box is not a number
-        lo = max(self.OUT_MIN_US, min(self.OUT_MAX_US, lo))
-        mid = max(self.OUT_MIN_US, min(self.OUT_MAX_US, mid))
-        hi = max(self.OUT_MIN_US, min(self.OUT_MAX_US, hi))
-        if lo == old.out_min and mid == old.out_mid and hi == old.out_max:
-            return
-        self.mixer.channels[i] = dataclasses.replace(old, out_min=lo,
-                                                     out_mid=mid, out_max=hi)
-        self.cfg["channels"][i] = self.mixer.channels[i].to_dict()
+        # Typed as the flight controller shows them, and kept as the values
+        # that show that way on this setup. A box left as it was keeps
+        # exactly what it sends: tabbing through must never move a channel.
+        def pick(typed, units, kind):
+            if typed == self._shown(units, i):
+                return units
+            return self._value_for(typed, i, kind)[0]
+        units = (pick(lo, old.lo_units, "low"), pick(mid, old.mid_units, "mid"),
+                 pick(hi, old.hi_units, "high"))
+        if units != (old.lo_units, old.mid_units, old.hi_units):
+            self.mixer.channels[i] = dataclasses.replace(old, out_units=units)
+            self.cfg["channels"][i] = self.mixer.channels[i].to_dict()
+        # Show what the flight controller will: a number it cannot show is
+        # moved to the nearest it can, and mid is held between the ends.
+        new = self.mixer.channels[i]
+        w["lo"].set(str(self._shown(new.lo_units, i)))
+        w["mid"].set(str(self._shown(new.mid_units, i)))
+        w["hi"].set(str(self._shown(new.hi_units, i)))
 
     def reset_outputs(self):
+        full = (crsf.CHANNEL_MIN, crsf.CHANNEL_MID, crsf.CHANNEL_MAX)
         for i in range(crsf.NUM_CHANNELS):
-            self.out_widgets[i]["lo"].set(str(self.OUT_MIN_US))
-            self.out_widgets[i]["mid"].set(str(crsf.US_MID))
-            self.out_widgets[i]["hi"].set(str(self.OUT_MAX_US))
-            self.on_output_changed(i)
+            old = self.mixer.channels[i]
+            if (old.lo_units, old.mid_units, old.hi_units) != full:
+                self.mixer.channels[i] = dataclasses.replace(old, out_units=full)
+                self.cfg["channels"][i] = self.mixer.channels[i].to_dict()
+        self._refresh_us_widgets()
         self.log("info", "Every channel back to full travel.")
 
     # -------------------------------------------------------------- module
@@ -684,9 +724,9 @@ class App(tk.Tk):
             self._commit_on(guard_spin,
                             lambda _e, n=i: self.on_channel_changed(n))
 
-            fixed_us = tk.StringVar(value=str(int(round(
-                crsf.crsf_to_us(chcfg.value)))))
-            fixed_spin = ttk.Spinbox(grid, from_=crsf.US_MIN, to=crsf.US_MAX,
+            fixed_us = tk.StringVar(value=str(self._shown(chcfg.value, i)))
+            fixed_spin = ttk.Spinbox(grid, from_=self._shown(crsf.CHANNEL_MIN, i),
+                                     to=self._shown(crsf.CHANNEL_MAX, i),
                                      increment=10, width=6,
                                      textvariable=fixed_us,
                                      command=lambda n=i: self.on_channel_changed(n))
@@ -1502,7 +1542,7 @@ class App(tk.Tk):
         # which is simply centre and has nothing to set.
         if ch.src == "fixed":
             w["fixed_spin"].config(state="normal")
-            w["fixed_us"].set(str(int(round(crsf.crsf_to_us(ch.value)))))
+            w["fixed_us"].set(str(self._shown(ch.value, n)))
         else:
             w["fixed_us"].set(self.NO_INDEX)
             w["fixed_spin"].config(state="disabled")
@@ -1551,10 +1591,7 @@ class App(tk.Tk):
                 # Typed in microseconds, stored in channel units - the
                 # same numbers the flight controller reports, so what is
                 # typed here is what it shows.
-                value=old.value if raw_fixed in ("", self.NO_INDEX)
-                      else crsf.clamp_channel(crsf.us_to_crsf(
-                          max(crsf.US_MIN,
-                              min(crsf.US_MAX, int(float(raw_fixed)))))),
+                value=self._fixed_value(n, old.value, raw_fixed),
                 steps=old.steps if raw_steps in ("", self.NO_INDEX)
                       else max(2, min(6, int(raw_steps))),
                 guard=old.guard if raw_guard in ("", self.NO_INDEX)
@@ -1564,7 +1601,7 @@ class App(tk.Tk):
                 # every Save, which edits all sixteen - quietly puts it back
                 # to its default.
                 out_min=old.out_min, out_mid=old.out_mid,
-                out_max=old.out_max,
+                out_max=old.out_max, out_units=old.out_units,
                 reset_ch=self._reset_value(w["reset_ch"].get()),
                 # "none" here is the box being blanked for a source that has
                 # no latch, exactly as for index and steps - not a value.
@@ -1686,12 +1723,18 @@ class App(tk.Tk):
     def _apply_auto_rate(self):
         """Follow the frame interval the module broadcasts in its sync frames."""
         if not (self.link and self.link.running):
+            self._rate_probed_for = None     # read again on the next link
             return
         requested = self.link.requested_rate()
         if requested is None:
             if self.rate_auto.get():
                 self.rate_hint.config(text="(waiting for the module to say)")
             return
+        # A new interval means a new packet rate - perhaps chosen on the
+        # module's own button - so find out whether it is a Full one.
+        if requested != self._rate_probed_for:
+            self._rate_probed_for = requested
+            self._probe_packet_rate()
 
         want = crsf.recommended_crsf_rate(requested, self.link.baud)
         self.rate_hint.config(text=f"(module asks {requested:.0f} Hz)")
@@ -1788,6 +1831,9 @@ class App(tk.Tk):
                 tag, result, error = self._module_q.get_nowait()
             except queue.Empty:
                 return
+            if tag.startswith("rate_"):
+                self._on_rate_probe(tag, result, error)
+                continue
             if self.link is None or not self.link.running:
                 self.module_btn.config(state="normal")
                 continue
@@ -1803,6 +1849,7 @@ class App(tk.Tk):
                 self._request_field(1)
             elif tag == "field":
                 self._fields[result.index] = result
+                self._note_packet_rate(result)
                 nxt = result.index + 1
                 if nxt <= (self._device or {}).get("field_count", 0):
                     self._request_field(nxt)
@@ -1954,6 +2001,7 @@ class App(tk.Tk):
     def _after_write(self, field):
         """ExpressLRS can change other fields in response, so reload them all."""
         self._fields[field.index] = field
+        self._note_packet_rate(field)
         pending = self._pending_write
         self._pending_write = None
 
@@ -2088,7 +2136,7 @@ class App(tk.Tk):
         for i, ch in enumerate(self.mixer.channels):
             if ch.src == "throttle" and values[i] > crsf.CHANNEL_MIN + 20:
                 concerns.append(f"CH{i + 1} throttle at "
-                                f"{crsf.crsf_to_us(values[i]):.0f} us")
+                                f"{self._shown(values[i], i)} us")
         for n in self.mixer.armed_channels():
             concerns.append(f"CH{n} armed")
         if self._model_armed():
@@ -2267,13 +2315,13 @@ class App(tk.Tk):
             v = values[i]
             w["bar"]["value"] = max(0, min(1000, (v - crsf.CHANNEL_MIN) * 1000 //
                                            (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)))
-            w["val"].config(text=fmt_channel(v))
+            w["val"].config(text=fmt_channel(v, self._shown(v, i)))
 
         for i, w in enumerate(self.out_widgets):
             v = values[i]
             w["bar"]["value"] = max(0, min(1000, (v - crsf.CHANNEL_MIN) * 1000 //
                                            (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)))
-            w["sent"].config(text=f"{crsf.crsf_to_us(v):.0f} µs")
+            w["sent"].config(text=f"{self._shown(v, i)} µs")
 
         # ---- throttle + arm
         thr_pct = self.mixer.throttle.value * 100.0
@@ -2455,6 +2503,138 @@ class App(tk.Tk):
         self._save_one("firmware", chosen, "the firmware setting")
         self.log("info", f"Telemetry now read as "
                          f"{self.FIRMWARE_LABELS[chosen]}.")
+        self._refresh_us_widgets()
+
+    # ---------------------------------------------- microseconds as shown
+    RX_OUTPUT_LABELS = {"crsf": "CRSF", "mavlink": "MAVLink"}
+
+    def on_rx_output_changed(self):
+        """Show microseconds the way this receiver output delivers them."""
+        chosen = {v: k for k, v in self.RX_OUTPUT_LABELS.items()}.get(
+            self.rx_output.get(), crsf.DEFAULT_RX_OUTPUT)
+        if chosen == self.cfg.get("rx_output"):
+            return
+        self.cfg["rx_output"] = chosen
+        self._save_one("rx_output", chosen, "the receiver setting")
+        self.log("info", f"Receiver output {self.RX_OUTPUT_LABELS[chosen]}: "
+                         f"{self._full_travel_text()}")
+        self._refresh_us_widgets()
+
+    def _view(self):
+        """What decides the microseconds the flight controller shows."""
+        return {"firmware": self.cfg.get("firmware", crsf.DEFAULT_FIRMWARE),
+                "rx_output": self.cfg.get("rx_output", crsf.DEFAULT_RX_OUTPUT),
+                "full_res": bool(self.cfg.get("full_res", False))}
+
+    def _shown(self, value, channel):
+        """The microseconds the flight controller will show for this value."""
+        return crsf.fc_shows(value, channel, **self._view())
+
+    def _value_for(self, us, channel, kind):
+        """(value to send, what that shows) for a number typed in us."""
+        return crsf.value_for_shown(us, channel, kind, **self._view())
+
+    def _fixed_value(self, i, old_value, raw):
+        """A fixed channel's value from its box: typed as the flight
+        controller shows it, and kept exactly as it was if left alone."""
+        if raw in ("", self.NO_INDEX):
+            return old_value
+        typed = int(float(raw))           # a ValueError is the caller's to catch
+        if typed == self._shown(old_value, i):
+            return old_value
+        return self._value_for(typed, i, "value")[0]
+
+    def _probe_packet_rate(self):
+        """Ask the module which packet rate it is running.
+
+        Its own small read through the link's settings queue, the same one
+        the Module tab uses: identify, then read fields from the first until
+        Packet Rate turns up - it is the first in ExpressLRS - and stop.
+        Settings travel alongside the channel data, as the Module tab's do.
+        """
+        if not (self.link and self.link.running) or self._rate_probe_busy:
+            return
+        self._rate_probe_busy = True
+        self.link.submit("ping", on_done=self._module_cb("rate_ping"))
+
+    def _on_rate_probe(self, tag, result, error):
+        if error or result is None or not (self.link and self.link.running):
+            self._rate_probe_busy = False    # tried again when the rate next changes
+            return
+        if tag == "rate_ping":
+            self._rate_probe_count = result.get("field_count", 0)
+            if self._rate_probe_count < 1:
+                self._rate_probe_busy = False
+                return
+            self.link.submit("read", index=1, on_done=self._module_cb("rate_field"))
+            return
+        if self._note_packet_rate(result):
+            self._rate_probe_busy = False
+            return
+        nxt = result.index + 1
+        if nxt <= min(self._rate_probe_count, 8):
+            self.link.submit("read", index=nxt, on_done=self._module_cb("rate_field"))
+        else:
+            self._rate_probe_busy = False
+
+    def _note_packet_rate(self, field):
+        """Take the packet rate from this field if it is Packet Rate.
+
+        A "Full" rate - 100Hz Full, 333Hz Full, 200Hz Full, K1000 Full -
+        is exactly one ExpressLRS sends at full resolution. Returns whether
+        the field was Packet Rate at all.
+        """
+        if (field is None or field.type != crsf.PARAM_SELECT
+                or not str(field.name).startswith("Packet Rate")):
+            return False
+        name = str(field.current_label).split("(")[0].strip()
+        if not name:
+            return True
+        full = "Full" in name
+        if name == self.cfg.get("packet_rate") and full == bool(self.cfg.get("full_res")):
+            return True
+        self.cfg["packet_rate"] = name
+        self.cfg["full_res"] = full
+        self._save_one("packet_rate", name, "the packet rate")
+        self._save_one("full_res", full, "the packet rate")
+        self.log("info", f"Module packet rate {name}"
+                         f"{', full resolution' if full else ''}: "
+                         f"{self._full_travel_text()}.")
+        self._refresh_us_widgets()
+        return True
+
+    def _full_travel_text(self):
+        return (f"full travel shows as {self._shown(crsf.CHANNEL_MIN, 0)}-"
+                f"{self._shown(crsf.CHANNEL_MAX, 0)} us")
+
+    def _show_packet_rate(self):
+        name = self.cfg.get("packet_rate", "")
+        if not name:
+            self.rate_name_lbl.config(text="packet rate: not read yet")
+        else:
+            self.rate_name_lbl.config(
+                text=f"{name}" + (" (full res)" if self.cfg.get("full_res") else ""))
+
+    def _refresh_us_widgets(self):
+        """Redo every microsecond figure for the setup now chosen.
+
+        Display only: what each channel sends is its own business and is
+        not touched, so choosing another firmware, receiver output or
+        packet rate can never move anything on the model.
+        """
+        for i, w in enumerate(self.out_widgets):
+            ch = self.mixer.channels[i]
+            low, high = self._shown(crsf.CHANNEL_MIN, i), self._shown(crsf.CHANNEL_MAX, i)
+            for key in ("lo_spin", "mid_spin", "hi_spin"):
+                w[key].config(from_=low, to=high)
+            w["lo"].set(str(self._shown(ch.lo_units, i)))
+            w["mid"].set(str(self._shown(ch.mid_units, i)))
+            w["hi"].set(str(self._shown(ch.hi_units, i)))
+        for i, w in enumerate(self.ch_widgets):
+            w["fixed_spin"].config(from_=self._shown(crsf.CHANNEL_MIN, i),
+                                   to=self._shown(crsf.CHANNEL_MAX, i))
+            self._sync_row_widgets(i)
+        self._show_packet_rate()
 
     # The model has to have been seen marking a disarm before the absence
     # of that mark means anything.
@@ -2706,6 +2886,10 @@ class App(tk.Tk):
                 f"gone unless you have exported it. Latch positions are not "
                 f"imported - every latch starts low."):
             return
+        # The packet rate belongs to the module on this desk, not to the
+        # aircraft in the file: keep what the module last reported.
+        for key in ("packet_rate", "full_res"):
+            cfg[key] = self.cfg.get(key, cfg.get(key))
         self.cfg = cfg
         self._apply_config_to_widgets()
         try:
@@ -2767,9 +2951,6 @@ class App(tk.Tk):
             w["src"].set(ch.src)
             w["inv"].set(ch.inv)
             w["dev"].set(str(ch.dev))
-            self.out_widgets[i]["lo"].set(str(ch.out_min))
-            self.out_widgets[i]["mid"].set(str(ch.out_mid))
-            self.out_widgets[i]["hi"].set(str(ch.out_max))
             self._sync_row_widgets(i)
         t = self.cfg["throttle"]
         self.thr_mode.set(t["mode"])
@@ -2800,6 +2981,11 @@ class App(tk.Tk):
         self._armed_report = None
         self._said_star_hint = False
         self._mode_since = 0.0
+        rx = self.cfg.get("rx_output", crsf.DEFAULT_RX_OUTPUT)
+        if rx not in crsf.RX_OUTPUTS:
+            rx = crsf.DEFAULT_RX_OUTPUT
+        self.rx_output.set(self.RX_OUTPUT_LABELS[rx])
+        self._refresh_us_widgets()
 
         # The port and the devices come from the file too. refresh_ports
         # already picks out cfg["port"] if it is there, and refresh_gamepads

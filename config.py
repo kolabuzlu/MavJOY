@@ -78,6 +78,16 @@ DEFAULT_CONFIG = {
     # Which firmware is flying. The telemetry frames are the same either
     # way, but the two say "armed" differently - see crsf.ArmWatch.
     "firmware": "ardupilot",
+    # How the receiver hands channels to the flight controller: "crsf" for
+    # CRSF frames the flight controller converts itself, "mavlink" when the
+    # receiver runs in MAVLink mode and sends it microseconds. Only what
+    # MavJOY shows depends on it - see crsf.fc_shows.
+    "rx_output": "crsf",
+    # The packet rate the module last reported, and whether it is a
+    # full-resolution one. Read from the module; only what MavJOY shows
+    # depends on it, and it belongs to the module rather than the model.
+    "packet_rate": "",
+    "full_res": False,
     "gamepads": [0, None],
     # Where the ExpressLRS layout file for the TX module was last found.
     # Only the TX module tab uses it; it has nothing to do with flying.
@@ -155,7 +165,7 @@ CONFIG_FORMAT = 1
 
 # Keys that record what this machine was doing rather than how the model is
 # set up, so they do not travel with an exported configuration.
-NOT_PORTABLE = ("latches", "layout_path")
+NOT_PORTABLE = ("latches", "layout_path", "packet_rate", "full_res")
 
 
 def _normalise(data):

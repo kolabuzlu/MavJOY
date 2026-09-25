@@ -568,6 +568,93 @@ def _check_endpoints():
     print(f"   200 frames with the device gone: {crept:.0f} us")
     assert abs(crept - 1900) < 2, f"the value crept to {crept:.0f} us"
 
+    # ---- what the flight controller shows. Each piece restated here from
+    # its source, written independently of crsf.py's own versions: the
+    # flight controllers' conversions, ExpressLRS's fmap (C division, which
+    # truncates toward zero) and what its link does to a channel.
+    def c_div(a, b):
+        return int(a / b)
+
+    def elrs_fmap(x, a, b, c, d):
+        r = c_div(c_div((x - a) * (d - c) * 2, b - a) + c * 2 + 1, 2)
+        return min(65535, max(0, r))
+
+    def arrives(v, ch, full):
+        if full:
+            return v // 2 * 2
+        if ch < 4:
+            v = min(1811, max(172, v))
+            return elrs_fmap(elrs_fmap(v, 172, 1811, 0, 1023), 0, 1023, 172, 1811)
+        return v
+
+    def reads(v, fw, rx):
+        if rx == "mavlink":
+            return elrs_fmap(v, 172, 1811, 988, 2012)
+        return v * 1024 // 1639 + 881 if fw == "inav" else v * 5 // 8 + 880
+
+    setups = [(fw, rx, full) for fw in ("inav", "ardupilot")
+              for rx in ("crsf", "mavlink") for full in (False, True)]
+    for fw, rx, full in setups:
+        for ch in (0, 4):
+            for v in range(172, 1812):
+                want = reads(arrives(v, ch, full), fw, rx)
+                got = crsf.fc_shows(v, ch, fw, rx, full)
+                assert got == want, f"{fw}/{rx}/full={full} CH{ch + 1} {v}: {got} != {want}"
+    # The table in the user's own words: full travel as each setup shows it.
+    ends = {("inav", "crsf", False): (988, 2012), ("inav", "crsf", True): (988, 2011),
+            ("ardupilot", "crsf", False): (987, 2011), ("ardupilot", "crsf", True): (987, 2011),
+            ("ardupilot", "mavlink", False): (988, 2012),
+            ("ardupilot", "mavlink", True): (988, 2011)}
+    for (fw, rx, full), (lo_us, hi_us) in ends.items():
+        assert (crsf.fc_shows(172, 0, fw, rx, full), crsf.fc_shows(1811, 0, fw, rx, full),
+                crsf.fc_shows(992, 0, fw, rx, full)) == (lo_us, hi_us, 1500), (fw, rx, full)
+    # What Mission Planner showed on the bench: MAVLink receiver, 100Hz
+    # Full - 988 at full low, 2011 at full high, where plain CRSF arithmetic
+    # said 987 and 2012.
+    assert (crsf.fc_shows(172, 0, "ardupilot", "mavlink", True),
+            crsf.fc_shows(1811, 0, "ardupilot", "mavlink", True)) == (988, 2011)
+    print("   flight controller's numbers: 4 setups x 2 resolutions, every value, "
+          "as their sources compute them")
+
+    # And back: a typed number becomes a value that shows as it, whenever
+    # the flight controller can show it; full travel and centre are always
+    # ExpressLRS's own 172, 1811 and 992; a number it cannot show goes to
+    # the nearest one it can.
+    for fw, rx, full in setups:
+        for ch in (0, 4):
+            shown = {crsf.fc_shows(v, ch, fw, rx, full) for v in range(172, 1812)}
+            for us in range(min(shown), max(shown) + 1):
+                for kind in ("low", "mid", "high", "value"):
+                    v, s = crsf.value_for_shown(us, ch, kind, fw, rx, full)
+                    assert crsf.fc_shows(v, ch, fw, rx, full) == s, (fw, rx, full, us, kind)
+                    if us in shown:
+                        assert s == us, (fw, rx, full, us, kind)
+                    else:
+                        assert abs(s - us) == min(abs(t - us) for t in shown), (us, s)
+            for anchor in (172, 992, 1811):
+                us = crsf.fc_shows(anchor, ch, fw, rx, full)
+                for kind in ("low", "mid", "high", "value"):
+                    assert crsf.value_for_shown(us, ch, kind, fw, rx, full)[0] == anchor, (
+                        f"{us} is full travel or centre on {fw}/{rx}/full={full}")
+    print("   typed numbers: every one it can show, both ways; full travel "
+          "always 172/1811, centre 992")
+
+    # Endpoints kept as the values they send, exactly, through a save; and
+    # the microseconds written beside them are an older MavJOY's, so it
+    # still reads full travel as full travel.
+    kept = gp.ChannelMap(src="axis", out_units=(191, 992, 1793))
+    assert (kept.lo_units, kept.mid_units, kept.hi_units) == (191, 992, 1793)
+    again = gp.ChannelMap.from_dict(kept.to_dict())
+    assert (again.lo_units, again.mid_units, again.hi_units) == (191, 992, 1793)
+    full = gp.ChannelMap(src="axis", out_units=(172, 992, 1811)).to_dict()
+    assert (full["out_min"], full["out_max"]) == (crsf.US_MIN, crsf.US_MAX)
+    assert gp.ChannelMap.from_dict({k: v for k, v in full.items()
+                                    if k != "out_units"}).untouched
+    held = gp.ChannelMap(src="axis", out_units=(300, 1900, 1700))
+    assert held.mid_units == 1700, "mid must be held between the ends"
+    print("   endpoint values kept exactly through a save; older versions "
+          "read the same full travel")
+
 
 def _check_rate_warning():
     """The rate warning gives advice that is true for the baud in use.

@@ -659,6 +659,15 @@ def _endpoint(value, default):
     return max(crsf.US_MIN, min(crsf.US_MAX, us))
 
 
+def _units(value):
+    """out_units from config: three channel values, or None if not usable."""
+    try:
+        lo, mid, hi = (int(u) for u in value)
+    except (TypeError, ValueError):
+        return None
+    return (lo, mid, hi)
+
+
 @dataclass
 class ChannelMap:
     """How one RC channel gets its value."""
@@ -675,26 +684,45 @@ class ChannelMap:
     out_mid: int = crsf.US_MID     # where centre sits, in microseconds
     out_max: int = crsf.US_MAX     # endpoint, in microseconds
     buttons: tuple = ()            # for "switch": explicit, non-consecutive
+    # The channel values the endpoints send - low, centre, high - when they
+    # were set as such. The microseconds a flight controller shows for one
+    # value depend on the firmware, the receiver and the packet rate, so a
+    # number typed on one setup is kept as the value it became, and shown
+    # again for whatever setup is chosen next. None: work them out from
+    # out_min/out_mid/out_max, exactly as every earlier version did.
+    out_units: tuple = None
 
     def __post_init__(self):
         # Worked out once here rather than per frame: the map is replaced
         # wholesale whenever anything about it is edited, so there is no
         # such thing as a stale copy.
-        # Snapped at the ends rather than converted: more than one channel
-        # value reads back as the same microsecond, so converting 2011 can
-        # land a unit short of the top and leave a channel fractionally
-        # scaled when it was meant to be left alone.
-        self.lo_units = (crsf.CHANNEL_MIN if self.out_min <= crsf.US_MIN
-                         else crsf.clamp_channel(crsf.us_to_crsf(self.out_min)))
-        self.hi_units = (crsf.CHANNEL_MAX if self.out_max >= crsf.US_MAX
-                         else crsf.clamp_channel(crsf.us_to_crsf(self.out_max)))
-        self.mid_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_mid))
+        if self.out_units is not None:
+            self.lo_units, self.mid_units, self.hi_units = (
+                crsf.clamp_channel(int(u)) for u in self.out_units)
+            # Kept in step for files read by earlier versions, which know
+            # only these three.
+            self.out_min = crsf.crsf_to_us(self.lo_units)
+            self.out_mid = crsf.crsf_to_us(self.mid_units)
+            self.out_max = crsf.crsf_to_us(self.hi_units)
+        else:
+            # Snapped at the ends rather than converted: more than one
+            # channel value reads back as the same microsecond, so
+            # converting 2011 can land a unit short of the top and leave a
+            # channel fractionally scaled when it was meant to be left alone.
+            self.lo_units = (crsf.CHANNEL_MIN if self.out_min <= crsf.US_MIN
+                             else crsf.clamp_channel(crsf.us_to_crsf(self.out_min)))
+            self.hi_units = (crsf.CHANNEL_MAX if self.out_max >= crsf.US_MAX
+                             else crsf.clamp_channel(crsf.us_to_crsf(self.out_max)))
+            self.mid_units = crsf.clamp_channel(crsf.us_to_crsf(self.out_mid))
         # Held inside the endpoints, so travel stays in one direction. A
         # centre outside them would run one half of the throw backwards,
         # which is not a trim, it is a fault nobody asked for.
         low, high = min(self.lo_units, self.hi_units), max(self.lo_units,
                                                            self.hi_units)
         self.mid_units = max(low, min(high, self.mid_units))
+        if self.out_units is not None:
+            self.out_units = (self.lo_units, self.mid_units, self.hi_units)
+            self.out_mid = crsf.crsf_to_us(self.mid_units)
         self.untouched = (self.lo_units == crsf.CHANNEL_MIN
                           and self.hi_units == crsf.CHANNEL_MAX
                           and self.mid_units == crsf.CHANNEL_MID)
@@ -723,7 +751,8 @@ class ChannelMap:
                    out_min=_endpoint(d.get("out_min"), crsf.US_MIN),
                    out_mid=_endpoint(d.get("out_mid"), crsf.US_MID),
                    out_max=_endpoint(d.get("out_max"), crsf.US_MAX),
-                   buttons=tuple(d.get("buttons") or ()))
+                   buttons=tuple(d.get("buttons") or ()),
+                   out_units=_units(d.get("out_units")))
 
     def to_dict(self):
         out = {"src": self.src, "idx": self.idx, "inv": self.inv,
@@ -734,6 +763,8 @@ class ChannelMap:
                "out_max": self.out_max}
         if self.buttons:
             out["buttons"] = list(self.buttons)
+        if self.out_units is not None:
+            out["out_units"] = list(self.out_units)
         return out
 
 

@@ -15,6 +15,8 @@ An RC channels frame is therefore 26 bytes total:
 
 from __future__ import annotations
 
+import functools
+
 # ---------------------------------------------------------------- addresses
 CRSF_SYNC_BYTE = 0xC8  # == CRSF_ADDRESS_FLIGHT_CONTROLLER
 ADDRESS_FLIGHT_CONTROLLER = 0xC8
@@ -149,6 +151,117 @@ def us_to_crsf(us: float) -> int:
         if crsf_to_us(approx + delta) == target:
             return approx + delta
     return approx
+
+
+# ----------------------------------------------- what the flight controller shows
+# The number a flight controller shows for a channel is not always the value
+# sent, worked out one fixed way. ExpressLRS carries each channel over the
+# air in fewer bits than CRSF has, and then either the flight controller or
+# - in MAVLink mode - the receiver turns what arrives into microseconds, each
+# its own way. Three things decide it, all from the ExpressLRS, INAV and
+# ArduPilot sources:
+#
+#   full_res   The packet rate is a "Full" one - 100Hz Full, 333Hz Full,
+#              200Hz Full, K1000 Full: every channel goes over the air as
+#              value >> 1 and comes back << 1, so an odd value arrives one
+#              lower. Other rates carry CH1-4 as 10 bits of the -100..+100%
+#              range, scaled there and back with ExpressLRS's rounding. They
+#              send CH5 and up as switch positions, which is not modelled
+#              here: those read as though carried whole.
+#   rx_output  "mavlink": the receiver converts to microseconds itself
+#              (CRSF_to_US: 172..1811 -> 988..2012, rounded) and the flight
+#              controller shows that. "crsf": the flight controller converts.
+#   firmware   How the flight controller converts: INAV value*1024/1639+881,
+#              ArduPilot value*5/8+880, both integer division.
+#
+# The value sent is never changed by any of this. It only decides what
+# MavJOY shows, and which value a typed number becomes.
+RX_OUTPUTS = ("crsf", "mavlink")
+DEFAULT_RX_OUTPUT = "crsf"
+
+
+def _trunc_div(a: int, b: int) -> int:
+    """C's integer division, which truncates toward zero."""
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b > 0) else -q
+
+
+def _elrs_fmap(x, in_min, in_max, out_min, out_max) -> int:
+    """ExpressLRS's fmap, rounding and all (crsf_protocol.h)."""
+    result = _trunc_div(_trunc_div((x - in_min) * (out_max - out_min) * 2,
+                                   in_max - in_min) + out_min * 2 + 1, 2)
+    return 0 if result < 0 else (65535 if result > 65535 else result)
+
+
+def over_the_air(value: int, channel: int, full_res: bool) -> int:
+    """The channel value the receiver hands on, for one sent.
+
+    `channel` counts from 0. Full resolution halves and doubles every
+    channel; otherwise CH1-4 are clamped to -100..+100% and scaled to 10
+    bits and back, and CH5 and up are passed through (see above).
+    """
+    v = int(value)
+    if full_res:
+        return (v >> 1) << 1
+    if channel < 4:
+        v = CHANNEL_MIN if v < CHANNEL_MIN else (CHANNEL_MAX if v > CHANNEL_MAX else v)
+        ten_bit = _elrs_fmap(v, CHANNEL_MIN, CHANNEL_MAX, 0, 1023)
+        return _elrs_fmap(ten_bit, 0, 1023, CHANNEL_MIN, CHANNEL_MAX)
+    return v
+
+
+def fc_shows(value: int, channel: int, firmware=None, rx_output=None,
+             full_res=False) -> int:
+    """The microseconds the flight controller will show for this value sent."""
+    v = over_the_air(value, channel, full_res)
+    if rx_output == "mavlink":
+        return _elrs_fmap(v, CHANNEL_MIN, CHANNEL_MAX, 988, 2012)
+    if firmware == "inav":
+        return v * 1024 // 1639 + 881
+    return (v * 5) // 8 + 880            # ArduPilot, and the default
+
+
+def value_for_shown(us: float, channel: int, kind: str, firmware=None,
+                    rx_output=None, full_res=False):
+    """The value to send so the flight controller shows `us`.
+
+    Returns (value, shown): shown is `us` itself when the flight controller
+    can show it, else the nearest number it can - at full resolution it
+    moves in steps of about 1.25 us, so not every number exists.
+
+    Several values often show the same number. Full travel and centre are
+    ExpressLRS's own 172, 1811 and 992 whenever those show as the number
+    asked for, so full travel stays full travel on every setup. Otherwise a
+    value the link carries unchanged is preferred, then the lowest - or for
+    a high endpoint ("high") the highest.
+    """
+    by_shown, reachable = _shown_table(channel < 4, firmware, rx_output,
+                                       bool(full_res))
+    target = int(round(us))
+    if target not in by_shown:
+        target = min(reachable, key=lambda s: (abs(s - target), s))
+    candidates = by_shown[target]
+    for anchor in (CHANNEL_MIN, CHANNEL_MAX, CHANNEL_MID):
+        if anchor in candidates:
+            return anchor, target
+    kept = [v for v in candidates
+            if over_the_air(v, channel, full_res) == v] or candidates
+    return (max(kept) if kind == "high" else min(kept)), target
+
+
+@functools.lru_cache(maxsize=32)
+def _shown_table(first_four, firmware, rx_output, full_res):
+    """{shown: [values that show as it]} and the sorted numbers shown.
+
+    CH1-4 and CH5 up only differ at standard rates, so one table serves
+    each group; built once per setup rather than on every typed number.
+    """
+    channel = 0 if first_four else 4
+    by_shown = {}
+    for v in range(CHANNEL_MIN, CHANNEL_MAX + 1):
+        by_shown.setdefault(fc_shows(v, channel, firmware, rx_output, full_res),
+                            []).append(v)
+    return by_shown, sorted(by_shown)
 
 
 def norm_to_crsf(value: float) -> int:
