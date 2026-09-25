@@ -264,6 +264,74 @@ def _shown_table(first_four, firmware, rx_output, full_res):
     return by_shown, sorted(by_shown)
 
 
+# ----------------------------------------------- which channels reach the model
+# ExpressLRS does not always carry all sixteen. The module keeps one Switch
+# Mode - 0, 1 or 2 - for every packet rate, and both its name and what it
+# carries follow the rate (ExpressLRS 4.1, OTA.cpp and TXModuleParameters.cpp):
+#
+#   mode   Full rates             other rates
+#   0      8ch          CH1-8     Wide    CH1-12
+#   1      16ch Rate/2  all 16    Hybrid  CH1-12
+#   2      12ch Mixed   CH1-12    not offered: the module goes back to 0
+#
+# The number is what to go by. The name is not: while binding, for one, the
+# module shows the other kind of rate's names beside a Full packet rate.
+#
+# Everywhere but 16ch Rate/2 at a Full rate the receiver writes armed / not
+# armed over CH14, and one with CRSF output writes link quality and RSSI over
+# CH15 and CH16 (SerialCRSF.cpp). Any other channel left out goes on with no
+# value in it: CRSF output sends 2047, about 2159 us, which ArduPilot reads as
+# high and INAV throws out, holding what it had; MAVLink output sends 881 us.
+SWITCH_MODES = {True: ("8ch", "16ch Rate/2", "12ch Mixed"),
+                False: ("Wide", "Hybrid", "Wide")}
+
+
+def full_resolution(rate_name) -> bool:
+    """Whether a packet rate sends every channel at full resolution.
+
+    Exactly the rates whose name says so: 100Hz Full, 333Hz Full, 200Hz
+    Full, K1000 Full.
+    """
+    return "Full" in str(rate_name or "")
+
+
+def switch_index(mode):
+    """A Switch Mode as the module numbers it, 0-2, or None if it is not one."""
+    return mode if type(mode) is int and 0 <= mode <= 2 else None
+
+
+def switch_mode_name(rate_name, mode) -> str:
+    """What the module calls Switch Mode `mode` at this rate, or ""."""
+    mode = switch_index(mode)
+    if mode is None or not rate_name:
+        return ""
+    return SWITCH_MODES[full_resolution(rate_name)][mode]
+
+
+def channels_carried(rate_name, mode):
+    """How many channels reach the receiver - 8, 12 or 16 - or None while
+    the module has not said enough to tell."""
+    if not rate_name:
+        return None
+    if not full_resolution(rate_name):
+        return 12
+    return {0: 8, 1: 16, 2: 12}.get(switch_index(mode))
+
+
+def channels_not_carried(used, count, rx_output=None):
+    """{channel index: what the model gets instead} for the channels in
+    `used`, counted from 0, that do not reach it as sent when `count` are
+    carried: "arm flag" on CH14, "LQ" and "RSSI" on CH15 and CH16 from a
+    receiver with CRSF output, and "not sent" for the rest."""
+    if count is None or count >= NUM_CHANNELS:
+        return {}
+    instead = {13: "arm flag"}
+    if rx_output != "mavlink":
+        instead.update({14: "LQ", 15: "RSSI"})
+    return {i: instead.get(i, "not sent") for i in used
+            if i in instead or i >= count}
+
+
 def norm_to_crsf(value: float) -> int:
     """-1.0 .. +1.0  ->  172 .. 1811 (linear, no expo, no mixing)."""
     value = -1.0 if value < -1.0 else (1.0 if value > 1.0 else value)

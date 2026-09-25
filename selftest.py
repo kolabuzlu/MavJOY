@@ -656,6 +656,323 @@ def _check_endpoints():
           "read the same full travel")
 
 
+def _check_channels_carried():
+    """Which mapped channels the model gets, for every rate and Switch Mode
+    ExpressLRS 4.1 offers.
+
+    Restated here from its source, independently of crsf.py. OTA.cpp: at
+    Full rates Switch Mode 0 (8ch) carries CH1-8, 1 (16ch Rate/2) all
+    sixteen and 2 (12ch Mixed) CH1-12; every other rate carries CH1-12,
+    whatever the mode. Everywhere but 16ch Rate/2 the receiver writes the
+    arm state over CH14, and its CRSF output (SerialCRSF.cpp) writes link
+    quality and RSSI over CH15 and CH16; MAVLink output leaves them unset,
+    like every other channel not carried.
+    """
+    print("")
+    print("-- channels the link carries --")
+    # The Nomad's own list (4.1.0, LR1121): Full exactly where it says so.
+    nomad = ["100Hz Full", "150Hz", "50Hz", "100Hz Full", "150Hz", "250Hz",
+             "333Hz Full", "500Hz", "DK250", "DK500", "K1000", "D50Hz", "25Hz",
+             "50Hz", "100Hz", "100Hz Full", "200Hz", "200Hz Full", "250Hz",
+             "K1000 Full"]
+    assert {r for r in nomad if crsf.full_resolution(r)} == {
+        "100Hz Full", "333Hz Full", "200Hz Full", "K1000 Full"}
+    full_count = {0: 8, 1: 16, 2: 12}
+    for rate in nomad:
+        full = "Full" in rate
+        # The number the module keeps, never its name, and never a bool.
+        for mode in (0, 1, 2, None, True, False, 3, -1, "8ch", "Hybrid"):
+            known = type(mode) is int and 0 <= mode <= 2
+            want = (full_count[mode] if known else None) if full else 12
+            assert crsf.channels_carried(rate, mode) == want, (rate, mode)
+    assert crsf.channels_carried("", 1) is None, "rate not read yet"
+    assert [crsf.switch_mode_name("100Hz Full", m) for m in (0, 1, 2)] == [
+        "8ch", "16ch Rate/2", "12ch Mixed"]
+    assert [crsf.switch_mode_name("250Hz", m) for m in (0, 1, 2)] == [
+        "Wide", "Hybrid", "Wide"]
+    assert crsf.switch_mode_name("", 1) == crsf.switch_mode_name("250Hz", None) == ""
+
+    def expect(used, count, rx):
+        if count is None or count >= 16:
+            return {}
+        out = {}
+        for n in used:
+            if n == 14:
+                out[n - 1] = "arm flag"
+            elif n in (15, 16) and rx != "mavlink":
+                out[n - 1] = "LQ" if n == 15 else "RSSI"
+            elif n > count:
+                out[n - 1] = "not sent"
+        return out
+
+    # The user's setups, by channel number.
+    setups = {"T1": [1, 2, 3, 5, 7, 10, 11, 13, 14, 15, 16],
+              "Secondbird XL": [1, 2, 3, 5, 6, 7, 8, 13],
+              "ardutest": [1, 2, 5, 6, 8], "all 16": list(range(1, 17))}
+    for used in setups.values():
+        for rate in ("100Hz Full", "333Hz Full", "250Hz", "K1000", ""):
+            for mode in (0, 1, 2, None):
+                count = crsf.channels_carried(rate, mode)
+                for rx in ("crsf", "mavlink"):
+                    got = crsf.channels_not_carried([n - 1 for n in used], count, rx)
+                    assert got == expect(used, count, rx), (used, rate, mode, rx)
+
+    def lost(used, rate, mode, rx="crsf"):
+        return crsf.channels_not_carried([n - 1 for n in used],
+                                         crsf.channels_carried(rate, mode), rx)
+
+    t1 = setups["T1"]
+    assert lost(t1, "333Hz Full", 1) == {}, "16ch Rate/2 carries all 16"
+    assert lost(t1, "100Hz Full", 0) == {
+        9: "not sent", 10: "not sent", 12: "not sent", 13: "arm flag",
+        14: "LQ", 15: "RSSI"}
+    assert lost(t1, "250Hz", 1) == {12: "not sent", 13: "arm flag",
+                                    14: "LQ", 15: "RSSI"}
+    assert lost(setups["Secondbird XL"], "250Hz", 1, "mavlink") == {12: "not sent"}
+    assert lost(setups["ardutest"], "100Hz Full", 0) == {}, "ardutest stops at CH8"
+    assert lost(t1, "100Hz Full", None) == {}, "no warning until the mode is read"
+    assert "switch_mode" in configmod.NOT_PORTABLE, \
+        "the Switch Mode belongs to the module, not the exported setup"
+    print("   every Nomad rate x Switch Mode x receiver output; CH14 arm, "
+          "CH15/16 LQ and RSSI; T1, Secondbird XL, ardutest")
+
+
+def _check_switch_mode_app():
+    """The app keeps what it says about the channels right as the module is
+    read, and never writes over the config on disk in the attempt.
+
+    The real App in simulate mode, against a stand-in module that lists its
+    settings the way ExpressLRS 4.1 does on a dual-band module - RF Band,
+    Packet Rate, Telem Ratio, Switch Mode - and sends link statistics.
+    config.json is neither read nor written: load and save are swapped out
+    for the whole check.
+    """
+    print("")
+    print("-- the channel warning in the app --")
+    try:
+        import tkinter as tk
+        tk.Tk().destroy()
+    except Exception as exc:
+        print(f"   skipped, no display: {exc}")
+        return
+    import types
+    import app as appmod
+
+    written = []
+    real_load, real_save = configmod.load, configmod.save
+    configmod.load = lambda *a, **k: (configmod.default_config(), None)
+    configmod.save = lambda cfg, *a, **k: written.append(dict(cfg))
+    a = None
+    try:
+        a = appmod.App(simulate=True)
+        a.withdraw()
+        logs = []
+        a.log = lambda level, msg: logs.append((level, msg))
+
+        def warns():
+            return [m for lvl, m in logs if lvl == "warn"]
+
+        # T1, INAV, CRSF receiver; nothing read from the module yet.
+        cfg = configmod.default_config()
+        for n, src in ((1, "axis"), (2, "axis"), (3, "throttle"), (5, "toggle"),
+                       (7, "oneway"), (10, "fixed"), (11, "fixed"), (13, "fixed"),
+                       (14, "fixed"), (15, "oneway"), (16, "switch")):
+            cfg["channels"][n - 1] = {"src": src, "idx": 1, "inv": False}
+        cfg.update(firmware="inav", rx_output="crsf", layout_path=r"C:\x.json")
+        a.cfg = cfg
+        a._apply_config_to_widgets()
+        assert a._not_carried == {} and not a.carry_lbl.winfo_manager()
+        assert a.rate_name_lbl.cget("text") == "packet rate: not read yet"
+
+        def select(index, name, options, value):
+            return crsf.ParamField(index, 0, crsf.PARAM_SELECT, False, name,
+                                   options=list(options), value=value)
+
+        full_modes = ("8ch", "16ch Rate/2", "12ch Mixed")
+
+        class Module:
+            """Answers settings reads at once, from its current state."""
+            baud, running = 921600, True
+
+            def __init__(self):
+                self.rate_hz, self.rate_label, self.mode = 100.0, "100Hz Full(-112dBm)", 0
+                self.rf_mode, self.lq, self.silent, self.asked = 7, 100, False, []
+                self.stats = types.SimpleNamespace(frames_sent=0)
+
+            def fields(self):
+                modes = full_modes if "Full" in self.rate_label else ("Wide", "Hybrid")
+                return {1: select(1, "RF Band", ("900", "2.4"), 0),
+                        2: select(2, "Packet Rate", (self.rate_label,), 0),
+                        3: select(3, "Telem Ratio", ("Std",), 0),
+                        4: select(4, "Switch Mode", modes, self.mode)}
+
+            def submit(self, kind, index=None, on_done=None, **kw):
+                self.asked.append((kind, index))
+                if self.silent:
+                    return
+                on_done({"field_count": 4, "name": "stand-in"} if kind == "ping"
+                        else self.fields().get(index), None)
+
+            def requested_rate(self):
+                return self.rate_hz
+
+            def set_rate(self, hz):
+                return False
+
+            def snapshot(self):
+                link = {"rf_mode": self.rf_mode, "up_lq": self.lq,
+                        "_t": time.monotonic()}
+                return {"link": link}, self.stats
+
+        m = Module()
+        a.link = m
+
+        def tick():
+            a._apply_auto_rate()
+            a._poll_module()
+
+        # The factory setting, 8ch, read in the Nomad's order.
+        tick()
+        assert m.asked == [("ping", None), ("read", 1), ("read", 2), ("read", 3),
+                           ("read", 4)], m.asked
+        assert (a.cfg["packet_rate"], a.cfg["switch_mode"]) == ("100Hz Full", 0)
+        assert a._not_carried == {9: "not sent", 10: "not sent", 12: "not sent",
+                                  13: "arm flag", 14: "LQ", 15: "RSSI"}
+        assert a.rate_name_lbl.cget("text") == "100Hz Full, 8ch"
+        assert str(a.rate_name_lbl.cget("foreground")) == a.pal["warn"]
+        # The note sits under the channel list, so rows never move for it.
+        order = a.carry_lbl.master.pack_slaves()
+        assert order.index(a.carry_lbl) == order.index(a.src_help) - 1 > 0, order
+        note = a.carry_lbl.cget("text")
+        assert note.startswith("At 100Hz Full with Switch Mode 8ch, ExpressLRS "
+                               "carries only CH1-8. CH10, CH11 and CH13 are "
+                               "mapped here but will not reach the model."), note
+        assert "INAV throws out" in note and "CH15 and CH16 will carry" in note
+        assert warns() == [note]
+        assert a._readout(1811, 12) == "1811  not sent"
+        assert a._readout(1810, 13) == "1810  arm flag"
+        assert a._readout(992, 14) == " 992  LQ"
+        # A channel that does arrive reads exactly as before.
+        for v in (172, 992, 1811):
+            assert a._readout(v, 0) == appmod.fmt_channel(v, a._shown(v, 0))
+        tick()
+        assert m.asked[-1] == ("read", 4) and len(m.asked) == 5, "read once"
+
+        # 16ch Rate/2, set from the Module tab: nothing is lost.
+        m.mode = 1
+        a._note_module_field(m.fields()[4])
+        assert a._not_carried == {} and not a.carry_lbl.winfo_manager()
+        assert a.rate_name_lbl.cget("text") == "100Hz Full, 16ch"
+        assert str(a.rate_name_lbl.cget("foreground")) == a.pal["muted"]
+        # While binding, the module shows the other kind of rate's names
+        # beside a Full packet rate: 8ch reads as "Wide". The number is what
+        # counts, so a Switch Mode first read then still warns.
+        a.cfg["switch_mode"] = None
+        a._show_carried()
+        assert a._not_carried == {}, "no warning while the mode is unknown"
+        a._note_module_field(select(4, "Switch Mode", ("Wide", "Hybrid"), 0))
+        assert a.cfg["switch_mode"] == 0 and a._not_carried[15] == "RSSI"
+        assert a.carry_lbl.cget("text").startswith("At 100Hz Full with Switch Mode 8ch")
+        a._note_module_field(m.fields()[4])             # back to 16ch Rate/2
+        assert a.cfg["switch_mode"] == 1 and a._not_carried == {}
+        assert len(warns()) == 2
+
+        # 100Hz Full -> 100Hz on the module itself: the same interval, so
+        # only the link statistics' rate says it changed.
+        m.asked.clear()
+        m.rate_label, m.rf_mode = "100Hz(-117dBm)", 6
+        tick()
+        assert m.asked and (a.cfg["packet_rate"], a.cfg["full_res"]) == ("100Hz", False)
+        assert a._not_carried == {12: "not sent", 13: "arm flag", 14: "LQ", 15: "RSSI"}
+        assert a.rate_name_lbl.cget("text") == "100Hz, Hybrid" and len(warns()) == 3
+
+        # A change while a read is still running is read after it.
+        m.asked.clear()
+        a._rate_probe_busy = True
+        m.rate_label, m.rf_mode = "100Hz Full(-112dBm)", 7
+        tick()
+        assert m.asked == [], "nothing new while a read runs"
+        a._rate_probe_busy = False
+        tick()
+        assert m.asked and a.cfg["packet_rate"] == "100Hz Full" and a._not_carried == {}
+
+        # A receiver connecting is when a Switch Mode changed while it was
+        # away takes effect: read again then.
+        m.asked.clear()
+        m.lq = 0
+        tick()
+        assert m.asked == [], "nothing to read when a receiver goes away"
+        m.mode, m.lq = 0, 100
+        tick()
+        assert m.asked and a.cfg["switch_mode"] == 0 and 15 in a._not_carried
+
+        # 12ch Mixed exists at Full rates only; the module goes back to 0 on
+        # its own at the others, and MavJOY follows it even unread.
+        m.mode = 2
+        a._note_module_field(m.fields()[4])
+        m.silent = True
+        a._note_module_field(select(2, "Packet Rate", ("250Hz(-108dBm)",), 0))
+        assert a.cfg["switch_mode"] == 0 and a.cfg["full_res"] is False
+
+        # The Module tab's own full read, and a write from it, follow the
+        # Switch Mode too.
+        m.silent = False
+        m.rate_label, m.mode = "100Hz Full(-112dBm)", 1
+        a.read_module_settings()
+        a._poll_module()
+        assert (a.cfg["full_res"], a.cfg["switch_mode"]) == (True, 1)
+        assert a._not_carried == {} and len(a._fields) == 4
+        m.mode = 0
+        a._after_write(m.fields()[4])
+        a._poll_module()
+        assert a.cfg["switch_mode"] == 0 and 15 in a._not_carried
+
+        # The receiver output decides CH15/16: MAVLink leaves them unset.
+        m.rate_label = "250Hz(-108dBm)"
+        a._note_module_field(m.fields()[2])
+        a.rx_output.set(a.RX_OUTPUT_LABELS["mavlink"])
+        a.on_rx_output_changed()
+        assert a._not_carried == {12: "not sent", 13: "arm flag", 14: "not sent",
+                                  15: "not sent"}
+        assert "reads a channel that never comes as low" in a.carry_lbl.cget("text")
+
+        # Import keeps what belongs to this desk - the module's settings and
+        # the layout file - and never the latches.
+        path = os.path.join(tempfile.mkdtemp(prefix="mavjoy_import_"), "t.json")
+        other = configmod.default_config()
+        other.update(layout_path="", switch_mode=None, packet_rate="")
+        real_save(other, path)
+        a.link = None
+        a.cfg["latches"] = {"5": 1811}
+        asked_file = appmod.filedialog.askopenfilename
+        asked_ok = appmod.messagebox.askokcancel
+        appmod.filedialog.askopenfilename = lambda **k: path
+        appmod.messagebox.askokcancel = lambda *x, **k: True
+        try:
+            a.import_config_file()
+        finally:
+            appmod.filedialog.askopenfilename = asked_file
+            appmod.messagebox.askokcancel = asked_ok
+        assert a.cfg["layout_path"] == r"C:\x.json" and a.cfg["latches"] == {}
+        assert (a.cfg["packet_rate"], a.cfg["switch_mode"]) == ("250Hz", 0)
+
+        # A config.json that cannot be read is never written over.
+        written.clear()
+        configmod.load = lambda *x, **k: (configmod.default_config(), "bad JSON")
+        assert a._save_one("switch_mode", 1, "the switch mode") is False
+        assert written == [], "a file that could not be read was written over"
+        print("   Nomad field order, 8ch/16ch/bind/100Hz swap/busy/connect/12ch, "
+              "MAVLink output, import, unreadable config: all as expected")
+    finally:
+        configmod.load, configmod.save = real_load, real_save
+        if a is not None:
+            a.link = None
+            for pending in a.tk.call("after", "info"):
+                a.after_cancel(pending)
+            a.gamepad.stop()
+            a.destroy()
+
+
 def _check_rate_warning():
     """The rate warning gives advice that is true for the baud in use.
 
@@ -1888,6 +2205,8 @@ def _run(wire):
     _check_module_prep()
     _check_hold_snapshot()
     _check_endpoints()
+    _check_channels_carried()
+    _check_switch_mode_app()
     _check_config_file()
     _check_fixed_value()
     _check_guard_button()

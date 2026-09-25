@@ -85,6 +85,10 @@ class App(tk.Tk):
         self._rate_probe_busy = False
         self._rate_probed_for = None        # the module rate it was read at
         self._rate_probe_count = 0
+        self._rate_probe_found = set()      # "rate", "switch": read so far
+        # Mapped channels the model does not get as sent, index -> what it
+        # gets instead. See _show_carried.
+        self._not_carried = {}
         self._field_vars = {}               # index -> the tk var editing it
         self._cmd_index = None              # command currently running
         self._telem_last = ""               # last telemetry text drawn
@@ -115,6 +119,7 @@ class App(tk.Tk):
         self._build_top()
         self._build_notebook()
         self._build_statusbar()
+        self._show_carried()        # needs the Channels and Log tabs both built
 
         self.bind("<Escape>", lambda _e: self.stop_link(reason="Esc pressed"))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -502,9 +507,9 @@ class App(tk.Tk):
         for i in range(crsf.NUM_CHANNELS):
             ch = self.mixer.channels[i]
             row = i + 2
-            ttk.Label(grid, text=f"CH{i + 1}",
-                      font=("TkDefaultFont", 9, "bold")).grid(
-                row=row, column=0, sticky="w", padx=(0, 10), pady=2)
+            ch_lbl = ttk.Label(grid, text=f"CH{i + 1}",
+                               font=("TkDefaultFont", 9, "bold"))
+            ch_lbl.grid(row=row, column=0, sticky="w", padx=(0, 10), pady=2)
             ttk.Label(grid, text=configmod.CHANNEL_HINTS[i], width=16,
                       foreground=self.pal["muted"]).grid(
                 row=row, column=1, sticky="w", padx=(0, 10))
@@ -540,6 +545,7 @@ class App(tk.Tk):
             bar.grid(row=row, column=6, sticky="ew", pady=2)
 
             self.out_widgets.append({"lo": lo, "mid": mid, "hi": hi,
+                                     "ch_lbl": ch_lbl,
                                      "sent": sent, "bar": bar,
                                      "lo_spin": lo_spin, "mid_spin": mid_spin,
                                      "hi_spin": hi_spin})
@@ -658,6 +664,14 @@ class App(tk.Tk):
         tab = ttk.Frame(nb)
         nb.add(tab, text="Channels")
 
+        # Packed under the grid only while a channel mapped here would not
+        # reach the model as set, at the module's packet rate and Switch
+        # Mode. See _show_carried.
+        self.carry_lbl = ttk.Label(tab, text="", foreground=self.pal["warn"],
+                                   wraplength=900, justify="left")
+        tab.bind("<Configure>", lambda e: self.carry_lbl.config(
+            wraplength=max(300, e.width - 30)))
+
         grid = ttk.Frame(tab)
         grid.pack(fill="both", expand=True, padx=10, pady=(10, 0))
 
@@ -682,8 +696,8 @@ class App(tk.Tk):
                             padx=(padl, padr), pady=2)
                 return widget
 
-            place(ttk.Label(grid, text=f"CH{i + 1}",
-                            font=("TkDefaultFont", 9, "bold")), 0)
+            ch_lbl = place(ttk.Label(grid, text=f"CH{i + 1}",
+                                     font=("TkDefaultFont", 9, "bold")), 0)
 
             dev = tk.StringVar(value=str(chcfg.dev))
             dev_combo = ttk.Combobox(grid, textvariable=dev, width=3,
@@ -761,6 +775,7 @@ class App(tk.Tk):
                             foreground=self.pal["muted"]), 12)
 
             self.ch_widgets.append({"src": src, "idx": idx, "inv": inv,
+                                    "ch_lbl": ch_lbl,
                                     "steps": steps, "bar": bar, "val": val,
                                     "spin": spin, "steps_spin": steps_spin,
                                     "dev": dev, "fixed_us": fixed_us,
@@ -1212,7 +1227,12 @@ class App(tk.Tk):
         on disk is re-read and only this one key is changed.
         """
         try:
-            saved, _warning = configmod.load()
+            saved, warning = configmod.load()
+            if warning:
+                # A file that cannot be read comes back as the defaults, and
+                # writing those back would wipe the saved mapping with them.
+                self.log("warn", f"Did not save {what}: {warning}")
+                return False
             saved[key] = value
             configmod.save(saved)
             return True
@@ -1616,6 +1636,7 @@ class App(tk.Tk):
         self._sync_row_widgets(n)
         self.cfg["channels"][n] = new.to_dict()
         self.src_help.config(text=f"{new.src}: {gp.SOURCE_HELP.get(new.src, '')}")
+        self._show_carried()
 
     def on_throttle_changed(self, _evt=None):
         t = self.cfg["throttle"]
@@ -1720,6 +1741,16 @@ class App(tk.Tk):
         if not self.rate_auto.get():
             self.rate_hint.config(text="(PC→module, not the RF rate)")
 
+    def _link_state(self, requested):
+        """(the rate the sync frames ask for, the rate the link statistics
+        name, whether a receiver is connected) - the last two None and False
+        while no link statistics are arriving."""
+        telem, _stats = self.link.snapshot()
+        link = telem.get("link")
+        if not link or time.monotonic() - link.get("_t", 0) > 2.0:
+            return requested, None, False
+        return requested, link.get("rf_mode"), bool(link.get("up_lq"))
+
     def _apply_auto_rate(self):
         """Follow the frame interval the module broadcasts in its sync frames."""
         if not (self.link and self.link.running):
@@ -1734,11 +1765,25 @@ class App(tk.Tk):
             if self.rate_auto.get():
                 self.rate_hint.config(text="(waiting for the module to say)")
             return
-        # A new interval means a new packet rate - perhaps chosen on the
-        # module's own button - so find out whether it is a Full one.
-        if requested != self._rate_probed_for:
-            self._rate_probed_for = requested
-            self._probe_packet_rate()
+        # Read the packet rate and Switch Mode again whenever they may have
+        # changed. A new interval means a new rate, perhaps chosen on the
+        # module itself. The rate the link statistics name catches the pairs
+        # that share an interval: 100Hz and 100Hz Full, 200Hz and 200Hz Full,
+        # K1000 and K1000 Full. And a receiver connecting is when a Switch
+        # Mode changed while it was away - the only time ExpressLRS allows
+        # that - takes effect. A change that comes while a read is still
+        # running is left unrecorded, and read once that one has finished.
+        now = self._link_state(requested)
+        last = self._rate_probed_for
+        if last is not None and now[1] is None:
+            now = (now[0], last[1], now[2])     # the link statistics went quiet
+        if not self._rate_probe_busy:
+            due = (last is None or now[0] != last[0]
+                   or (None not in (now[1], last[1]) and now[1] != last[1])
+                   or (now[2] and not last[2]))
+            self._rate_probed_for = now
+            if due:
+                self._probe_packet_rate()
 
         want = crsf.recommended_crsf_rate(requested, self.link.baud)
         self.rate_hint.config(text=f"(module asks {requested:.0f} Hz)")
@@ -1853,7 +1898,7 @@ class App(tk.Tk):
                 self._request_field(1)
             elif tag == "field":
                 self._fields[result.index] = result
-                self._note_packet_rate(result)
+                self._note_module_field(result)
                 nxt = result.index + 1
                 if nxt <= (self._device or {}).get("field_count", 0):
                     self._request_field(nxt)
@@ -2005,7 +2050,7 @@ class App(tk.Tk):
     def _after_write(self, field):
         """ExpressLRS can change other fields in response, so reload them all."""
         self._fields[field.index] = field
-        self._note_packet_rate(field)
+        self._note_module_field(field)
         pending = self._pending_write
         self._pending_write = None
 
@@ -2319,13 +2364,14 @@ class App(tk.Tk):
             v = values[i]
             w["bar"]["value"] = max(0, min(1000, (v - crsf.CHANNEL_MIN) * 1000 //
                                            (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)))
-            w["val"].config(text=fmt_channel(v, self._shown(v, i)))
+            w["val"].config(text=self._readout(v, i))
 
         for i, w in enumerate(self.out_widgets):
             v = values[i]
             w["bar"]["value"] = max(0, min(1000, (v - crsf.CHANNEL_MIN) * 1000 //
                                            (crsf.CHANNEL_MAX - crsf.CHANNEL_MIN)))
-            w["sent"].config(text=f"{self._shown(v, i)} µs")
+            w["sent"].config(text=self._not_carried.get(i)
+                             or f"{self._shown(v, i)} µs")
 
         # ---- throttle + arm
         thr_pct = self.mixer.throttle.value * 100.0
@@ -2534,6 +2580,14 @@ class App(tk.Tk):
         """The microseconds the flight controller will show for this value."""
         return crsf.fc_shows(value, channel, **self._view())
 
+    def _readout(self, value, channel):
+        """A channel's live figure: the value sent and what the flight
+        controller shows for it - or why the model never gets it."""
+        note = self._not_carried.get(channel)
+        if note:
+            return f"{value:4d}  {note}"
+        return fmt_channel(value, self._shown(value, channel))
+
     def _value_for(self, us, channel, kind):
         """(value to send, what that shows) for a number typed in us."""
         return crsf.value_for_shown(us, channel, kind, **self._view())
@@ -2549,16 +2603,19 @@ class App(tk.Tk):
         return self._value_for(typed, i, "value")[0]
 
     def _probe_packet_rate(self):
-        """Ask the module which packet rate it is running.
+        """Ask the module which packet rate and Switch Mode it is running.
 
         Its own small read through the link's settings queue, the same one
         the Module tab uses: identify, then read fields from the first until
-        Packet Rate turns up - it is the first in ExpressLRS - and stop.
-        Settings travel alongside the channel data, as the Module tab's do.
+        Packet Rate and Switch Mode have both turned up, and stop. In
+        ExpressLRS they are the first and third, or the second and fourth on
+        a dual-band module, which lists RF Band first. Settings travel
+        alongside the channel data, as the Module tab's do.
         """
         if not (self.link and self.link.running) or self._rate_probe_busy:
             return
         self._rate_probe_busy = True
+        self._rate_probe_found = set()
         self.link.submit("ping", on_done=self._module_cb("rate_ping"))
 
     def _on_rate_probe(self, tag, result, error):
@@ -2572,7 +2629,10 @@ class App(tk.Tk):
                 return
             self.link.submit("read", index=1, on_done=self._module_cb("rate_field"))
             return
-        if self._note_packet_rate(result):
+        found = self._note_module_field(result)
+        if found:
+            self._rate_probe_found.add(found)
+        if self._rate_probe_found >= {"rate", "switch"}:
             self._rate_probe_busy = False
             return
         nxt = result.index + 1
@@ -2581,31 +2641,67 @@ class App(tk.Tk):
         else:
             self._rate_probe_busy = False
 
+    def _note_module_field(self, field):
+        """Follow the module settings that what MavJOY shows depends on.
+
+        Returns which this field was - "rate" for Packet Rate, "switch" for
+        Switch Mode - or None for any other.
+        """
+        if field is None or field.type != crsf.PARAM_SELECT:
+            return None
+        name = str(field.name)
+        if name.startswith("Packet Rate"):
+            self._note_packet_rate(field)
+            return "rate"
+        if name.startswith("Switch Mode"):
+            self._note_switch_mode(field)
+            return "switch"
+        return None
+
     def _note_packet_rate(self, field):
-        """Take the packet rate from this field if it is Packet Rate.
+        """Take the packet rate from the module's Packet Rate field.
 
         A "Full" rate - 100Hz Full, 333Hz Full, 200Hz Full, K1000 Full -
-        is exactly one ExpressLRS sends at full resolution. Returns whether
-        the field was Packet Rate at all.
+        is exactly one ExpressLRS sends at full resolution.
         """
-        if (field is None or field.type != crsf.PARAM_SELECT
-                or not str(field.name).startswith("Packet Rate")):
-            return False
         name = str(field.current_label).split("(")[0].strip()
         if not name:
-            return True
-        full = "Full" in name
+            return
+        full = crsf.full_resolution(name)
         if name == self.cfg.get("packet_rate") and full == bool(self.cfg.get("full_res")):
-            return True
+            return
         self.cfg["packet_rate"] = name
         self.cfg["full_res"] = full
         self._save_one("packet_rate", name, "the packet rate")
         self._save_one("full_res", full, "the packet rate")
+        if not full and self.cfg.get("switch_mode") == 2:
+            # 12ch Mixed is offered at Full rates only, and the module goes
+            # back to 0 on its own - Wide here, 8ch at a Full rate.
+            self.cfg["switch_mode"] = 0
+            self._save_one("switch_mode", 0, "the switch mode")
         self.log("info", f"Module packet rate {name}"
                          f"{', full resolution' if full else ''}: "
                          f"{self._full_travel_text()}.")
         self._refresh_us_widgets()
-        return True
+
+    def _note_switch_mode(self, field):
+        """Take the Switch Mode from the module's Switch Mode field.
+
+        Kept as the module numbers it, not by name: the names change with
+        the kind of rate - 16ch Rate/2 at a Full rate is Hybrid at the
+        others - and while binding the module even shows the other kind's.
+        With the packet rate it decides which channels reach the model at
+        all; see crsf.channels_carried.
+        """
+        mode = crsf.switch_index(field.value)
+        if mode is None or mode == self.cfg.get("switch_mode"):
+            return
+        self.cfg["switch_mode"] = mode
+        self._save_one("switch_mode", mode, "the switch mode")
+        name = crsf.switch_mode_name(self.cfg.get("packet_rate"), mode)
+        self.log("info", f"Module switch mode {name or mode}.")
+        self._show_packet_rate()
+        self._show_carried()
 
     def _full_travel_text(self):
         return (f"full travel shows as {self._shown(crsf.CHANNEL_MIN, 0)}-"
@@ -2613,11 +2709,95 @@ class App(tk.Tk):
 
     def _show_packet_rate(self):
         name = self.cfg.get("packet_rate", "")
+        switch = crsf.switch_mode_name(name, self.cfg.get("switch_mode"))
         if not name:
-            self.rate_name_lbl.config(text="packet rate: not read yet")
+            text = "packet rate: not read yet"
+        elif switch:
+            # The mode's first word only. This strip is already wider than a
+            # 1536-px screen, and what gives way is the RF line's RSSI.
+            text = f"{name}, {switch.split()[0]}"
         else:
-            self.rate_name_lbl.config(
-                text=f"{name}" + (" (full res)" if self.cfg.get("full_res") else ""))
+            text = f"{name}" + (" (full res)" if self.cfg.get("full_res") else "")
+        self.rate_name_lbl.config(text=text)
+
+    def _show_carried(self):
+        """Mark the mapped channels the model will not get as sent.
+
+        At most packet rates and Switch Modes ExpressLRS carries fewer than
+        sixteen channels (crsf.channels_carried), and writes the arm state -
+        and, with CRSF output, link quality and RSSI - over channels of its
+        own. A mapped channel it leaves out or writes over does not reach
+        the model as set here, so its number turns amber on the Channels
+        and Outputs tabs, its readout says what the model gets instead, a
+        note under the channel list names them, and the rate label, which
+        is on screen whatever the tab, turns amber too. The note goes under
+        the list so that it coming and going never moves a row being
+        edited. Logged once each time the set changes. Display only:
+        nothing sent changes.
+        """
+        used = [i for i, ch in enumerate(self.mixer.channels) if ch.src != "none"]
+        rate = self.cfg.get("packet_rate", "")
+        mode = self.cfg.get("switch_mode")
+        count = crsf.channels_carried(rate, mode)
+        lost = crsf.channels_not_carried(used, count, self.cfg.get("rx_output"))
+        changed = lost != self._not_carried
+        self._not_carried = lost
+        for widgets in (self.ch_widgets, self.out_widgets):
+            for i, w in enumerate(widgets):
+                w["ch_lbl"].config(foreground=self.pal["warn"] if i in lost else "")
+        self.rate_name_lbl.config(
+            foreground=self.pal["warn"] if lost else self.pal["muted"])
+        text = self._carry_text(lost, rate, mode, count)
+        self.carry_lbl.config(text=text)
+        if text and not self.carry_lbl.winfo_manager():
+            self.carry_lbl.pack(before=self.src_help, anchor="w", padx=10,
+                                pady=(8, 0))
+        elif not text and self.carry_lbl.winfo_manager():
+            self.carry_lbl.pack_forget()
+        if lost and changed:
+            self.log("warn", text)
+
+    def _carry_text(self, lost, rate, mode, count):
+        """The note naming the mapped channels the model will not get."""
+        if not lost:
+            return ""
+
+        def names(kind):
+            chs = [f"CH{i + 1}" for i in sorted(lost) if lost[i] == kind]
+            if len(chs) > 1:
+                return ", ".join(chs[:-1]) + " and " + chs[-1], len(chs)
+            return "".join(chs), len(chs)
+
+        switch = crsf.switch_mode_name(rate, mode)
+        where = f"{rate} with Switch Mode {switch}" if switch else rate
+        text = f"At {where}, ExpressLRS carries only CH1-{count}."
+        dropped, n = names("not sent")
+        if n:
+            text += (f" {dropped} {'is' if n == 1 else 'are'} mapped here but "
+                     f"will not reach the model. {self._unsent_reads()}")
+        arm, n = names("arm flag")
+        if n:
+            text += f" {arm} will carry armed / not armed instead."
+        (lq, n_lq), (rssi, n_rssi) = names("LQ"), names("RSSI")
+        if n_lq and n_rssi:
+            text += f" {lq} and {rssi} will carry link quality and RSSI instead."
+        elif n_lq:
+            text += f" {lq} will carry link quality instead."
+        elif n_rssi:
+            text += f" {rssi} will carry RSSI instead."
+        return text + " All 16 need a Full rate with Switch Mode 16ch Rate/2."
+
+    def _unsent_reads(self):
+        """What the flight controller makes of a channel that never comes
+        (see crsf.py): MAVLink output sends it low, CRSF output sends it
+        with no value in it."""
+        if self.cfg.get("rx_output") == "mavlink":
+            return "The flight controller reads a channel that never comes as low."
+        if self.cfg.get("firmware") == "inav":
+            return ("INAV throws out a channel that never comes and holds "
+                    "its last value.")
+        return ("ArduPilot reads a channel that never comes as high, so a "
+                "switch there reads as on.")
 
     def _refresh_us_widgets(self):
         """Redo every microsecond figure for the setup now chosen.
@@ -2639,6 +2819,7 @@ class App(tk.Tk):
                                    to=self._shown(crsf.CHANNEL_MAX, i))
             self._sync_row_widgets(i)
         self._show_packet_rate()
+        self._show_carried()
 
     # The model has to have been seen marking a disarm before the absence
     # of that mark means anything.
@@ -2890,10 +3071,12 @@ class App(tk.Tk):
                 f"gone unless you have exported it. Latch positions are not "
                 f"imported - every latch starts low."):
             return
-        # The packet rate belongs to the module on this desk, not to the
-        # aircraft in the file: keep what the module last reported.
-        for key in ("packet_rate", "full_res"):
-            cfg[key] = self.cfg.get(key, cfg.get(key))
+        # What the module on this desk last reported, and where this
+        # machine's files are, belong here and not to the aircraft in the
+        # file: keep them. Latches are the exception - every latch starts low.
+        for key in configmod.NOT_PORTABLE:
+            if key != "latches":
+                cfg[key] = self.cfg.get(key, cfg.get(key))
         self.cfg = cfg
         self._apply_config_to_widgets()
         try:

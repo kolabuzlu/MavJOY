@@ -88,6 +88,11 @@ DEFAULT_CONFIG = {
     # depends on it, and it belongs to the module rather than the model.
     "packet_rate": "",
     "full_res": False,
+    # The module's Switch Mode as it last reported it, numbered as the module
+    # numbers it (0-2; null until read). With the packet rate it decides
+    # which channels reach the model at all - see crsf.channels_carried -
+    # and it belongs to the module as well.
+    "switch_mode": None,
     "gamepads": [0, None],
     # Where the ExpressLRS layout file for the TX module was last found.
     # Only the TX module tab uses it; it has nothing to do with flying.
@@ -165,7 +170,8 @@ CONFIG_FORMAT = 1
 
 # Keys that record what this machine was doing rather than how the model is
 # set up, so they do not travel with an exported configuration.
-NOT_PORTABLE = ("latches", "layout_path", "packet_rate", "full_res")
+NOT_PORTABLE = ("latches", "layout_path", "packet_rate", "full_res",
+                "switch_mode")
 
 
 def _normalise(data):
