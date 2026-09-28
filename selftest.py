@@ -938,21 +938,24 @@ def _check_switch_mode_app():
 
         # Import keeps what belongs to this desk - the module's settings and
         # the layout file - and never the latches.
-        path = os.path.join(tempfile.mkdtemp(prefix="mavjoy_import_"), "t.json")
+        # The file goes in a folder of its own that is removed afterwards,
+        # pass or fail, so runs do not pile up leftovers in %TEMP%.
         other = configmod.default_config()
         other.update(layout_path="", switch_mode=None, packet_rate="")
-        real_save(other, path)
         a.link = None
         a.cfg["latches"] = {"5": 1811}
         asked_file = appmod.filedialog.askopenfilename
         asked_ok = appmod.messagebox.askokcancel
-        appmod.filedialog.askopenfilename = lambda **k: path
-        appmod.messagebox.askokcancel = lambda *x, **k: True
-        try:
-            a.import_config_file()
-        finally:
-            appmod.filedialog.askopenfilename = asked_file
-            appmod.messagebox.askokcancel = asked_ok
+        with tempfile.TemporaryDirectory(prefix="mavjoy_import_") as folder:
+            path = os.path.join(folder, "t.json")
+            real_save(other, path)
+            appmod.filedialog.askopenfilename = lambda **k: path
+            appmod.messagebox.askokcancel = lambda *x, **k: True
+            try:
+                a.import_config_file()
+            finally:
+                appmod.filedialog.askopenfilename = asked_file
+                appmod.messagebox.askokcancel = asked_ok
         assert a.cfg["layout_path"] == r"C:\x.json" and a.cfg["latches"] == {}
         assert (a.cfg["packet_rate"], a.cfg["switch_mode"]) == ("250Hz", 0)
 
